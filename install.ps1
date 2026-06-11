@@ -112,6 +112,34 @@ Write-Host ""
 # ----------------------------------------------------------------
 # Step 3: engram のインストール
 # ----------------------------------------------------------------
+# 企業・学校のPCでは AppData(Roaming)がネットワークサーバー上にある
+# ことがあり、そこに置かれた Python はネットワーク越しに DLL を読み込めず
+# 動かない(実機で確認済み)。その場合は uv の置き場をローカルディスクへ移す。
+$appData = [Environment]::GetFolderPath("ApplicationData")
+$isNetworkAppData = $false
+if ($appData -like "\\*") {
+    $isNetworkAppData = $true
+} else {
+    try {
+        $drive = (Get-Item $appData -ErrorAction SilentlyContinue).PSDrive
+        if ($drive -and $drive.DisplayRoot -like "\\*") {
+            $isNetworkAppData = $true
+        }
+    } catch {}
+}
+
+if ($isNetworkAppData) {
+    Write-Host "  AppData がネットワーク上にあるPCを検出しました。"
+    Write-Host "  Python の置き場をローカルディスクに設定します(動作に必須)。"
+    $localUv = Join-Path $env:LOCALAPPDATA "uv"
+    $env:UV_TOOL_DIR = Join-Path $localUv "tools"
+    $env:UV_PYTHON_INSTALL_DIR = Join-Path $localUv "python"
+    # 以後のセッション(uv tool upgrade 等)でも同じ場所を使うよう永続化
+    setx UV_TOOL_DIR $env:UV_TOOL_DIR | Out-Null
+    setx UV_PYTHON_INSTALL_DIR $env:UV_PYTHON_INSTALL_DIR | Out-Null
+    Write-Host ""
+}
+
 Write-Host "[3/4] engram をインストールします..."
 Write-Host "  ソース: $Source"
 Write-Host "  (初回は Python 3.12 のダウンロードが発生する場合があります)"

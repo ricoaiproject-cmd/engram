@@ -93,11 +93,24 @@ def get_engram_mcp_path() -> Path | None:
     return None
 
 
+def _claude_cmd() -> str | None:
+    """claude CLI の実体パス。
+
+    npm 経由のインストールでは claude.cmd になっており、subprocess に
+    裸の "claude" を渡すと WinError 2 で失敗する(実機で発生した実例)。
+    必ず which の解決結果(拡張子付きフルパス)を使う。
+    """
+    return shutil.which("claude")
+
+
 def is_claude_mcp_registered() -> bool:
     """claude mcp list に "engram" が含まれるか確認。"""
+    cmd = _claude_cmd()
+    if cmd is None:
+        return False
     try:
         result = subprocess.run(
-            ["claude", "mcp", "list"],
+            [cmd, "mcp", "list"],
             capture_output=True, text=True, timeout=30,
             encoding="utf-8", errors="replace",
         )
@@ -109,7 +122,8 @@ def is_claude_mcp_registered() -> bool:
 
 def register_claude_mcp(engram_mcp_path: Path) -> tuple[bool, str]:
     """Claude Code に engram MCP を登録する。成功すれば (True, メッセージ)。"""
-    if shutil.which("claude") is None:
+    cmd = _claude_cmd()
+    if cmd is None:
         return False, "claude コマンドが見つかりません(Claude Code 未インストール)"
 
     if is_claude_mcp_registered():
@@ -117,7 +131,7 @@ def register_claude_mcp(engram_mcp_path: Path) -> tuple[bool, str]:
 
     try:
         result = subprocess.run(
-            ["claude", "mcp", "add", "--scope", "user", "engram",
+            [cmd, "mcp", "add", "--scope", "user", "engram",
              "--", str(engram_mcp_path)],
             capture_output=True, text=True, timeout=90,
             encoding="utf-8", errors="replace",
@@ -215,12 +229,17 @@ def register_gemini_mcp(
     try:
         mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
         if mcp_config_path.is_file():
-            try:
-                data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
-            except Exception:
-                # 壊れた既存設定を空で上書きすると他サーバーの登録が消える。
-                # 触らずに中断して手動修復を促す(破壊的変更をしない)
-                return False, "既存の mcp_config.json が解析できないため変更しません(手動で修復してください)"
+            raw = mcp_config_path.read_text(encoding="utf-8")
+            if raw.strip() == "":
+                # 空ファイルは「設定なし」として扱ってよい(実機で発生した実例)
+                data = {"mcpServers": {}}
+            else:
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    # 壊れた既存設定を空で上書きすると他サーバーの登録が消える。
+                    # 触らずに中断して手動修復を促す(破壊的変更をしない)
+                    return False, "既存の mcp_config.json が解析できないため変更しません(手動で修復してください)"
         else:
             data = {"mcpServers": {}}
 
