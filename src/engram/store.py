@@ -150,6 +150,7 @@ class MarkdownStore:
             importance=record.importance,
             source=record.source,
             tier=record.tier,
+            room=record.room,
             links=_links_to_frontmatter(record.links),
         )
         text = frontmatter.dumps(post)
@@ -168,6 +169,7 @@ class MarkdownStore:
         links: list[str] | None = None,
         id: str | None = None,
         created: str | None = None,
+        room: str = "common",
     ) -> MemoryRecord:
         """新規記憶ファイルを書き、MemoryRecord を返す。"""
         from ulid import ULID
@@ -195,6 +197,7 @@ class MarkdownStore:
             content=content,
             path=path,
             content_hash=ch,
+            room=room,
         )
         self._write_record(record)
         return record
@@ -215,6 +218,7 @@ class MarkdownStore:
             content=post.content,
             path=path,
             content_hash=content_hash(post.content),
+            room=str(post.get("room", "common")),
         )
 
     def find_by_id(self, id: str) -> MemoryRecord | None:
@@ -238,6 +242,7 @@ class MarkdownStore:
             content=record.content,
             path=record.path,
             content_hash=content_hash(record.content),
+            room=record.room,
         )
         self._write_record(updated)
         return updated
@@ -258,6 +263,7 @@ class MarkdownStore:
             content=record.content,
             path=record.path,
             content_hash=record.content_hash,
+            room=record.room,
         )
         self._write_record(updated)
         return updated
@@ -275,6 +281,7 @@ class MarkdownStore:
             content=record.content,
             path=record.path,
             content_hash=record.content_hash,
+            room=record.room,
         )
         self._write_record(updated)
         return updated
@@ -303,6 +310,7 @@ class MarkdownStore:
             content=record.content,
             path=new_path,
             content_hash=record.content_hash,
+            room=record.room,
         )
         self._write_record(updated)
         return updated

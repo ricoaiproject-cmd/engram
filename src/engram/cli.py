@@ -10,6 +10,8 @@ argparse のサブコマンドで engine を直接叩く。出力は人間可読
     engram forget ID / engram link SRC DST
     engram stats / engram reindex
     engram consolidation-candidates
+    engram surface "発話" [--room X]     自発的想起の手動確認(何も書き込まない)
+    engram hook session-end|user-prompt  エージェントのフック用入口(stdin JSON)
 
 --fake-embedder フラグで FakeEmbedder を使う(モデル未導入環境での試験用)。
 """
@@ -158,6 +160,11 @@ def main() -> None:
         default="",
         help="関連記憶 ID のカンマ区切り",
     )
+    p_remember.add_argument(
+        "--room",
+        default=None,
+        help="記憶の部屋(省略時は現在のディレクトリから自動判定)",
+    )
 
     # --- recall ---
     p_recall = subparsers.add_parser("recall", help="記憶を検索する")
@@ -182,6 +189,11 @@ def main() -> None:
         "--no-record",
         action="store_true",
         help="recall_hit イベントを記録しない",
+    )
+    p_recall.add_argument(
+        "--room",
+        default=None,
+        help='検索する部屋(省略時は現在のディレクトリから自動判定。"*" で全部屋)',
     )
 
     # --- reinforce ---
@@ -256,6 +268,29 @@ def main() -> None:
     # --- doctor ---
     subparsers.add_parser("doctor", help="環境診断を表示する")
 
+    # --- surface ---
+    p_surface = subparsers.add_parser(
+        "surface",
+        help="自発的想起の手動確認(ログ・状態は書き込まない)",
+    )
+    p_surface.add_argument("query", help="発話(プロンプト)に相当するテキスト")
+    p_surface.add_argument(
+        "--room",
+        default=None,
+        help="部屋(省略時は現在のディレクトリから自動判定)",
+    )
+
+    # --- hook ---
+    p_hook = subparsers.add_parser(
+        "hook",
+        help="エージェントのフックから呼ばれる入口(stdin の JSON を読む)",
+    )
+    p_hook.add_argument(
+        "event",
+        choices=["session-end", "user-prompt"],
+        help="フックイベント名",
+    )
+
     args = parser.parse_args()
 
     # setup / doctor はエンジン構築なしで動く
@@ -284,6 +319,43 @@ def main() -> None:
         doctor_main()
         return
 
+    # hook / surface はエンジン構築なし(高速経路)で動く
+    if args.command == "hook":
+        from .hooks import run_session_end, run_user_prompt
+        if args.event == "session-end":
+            sys.exit(run_session_end())
+        else:
+            sys.exit(run_user_prompt())
+
+    if args.command == "surface":
+        from pathlib import Path
+
+        from .config import get_settings, resolve_room
+        from .surface import run_surface
+
+        settings = get_settings()
+        room = args.room or resolve_room(Path.cwd(), settings.room_paths)
+        result = run_surface(
+            args.query, settings=settings, room=room, mode="shadow",
+            dry_run=True,
+        )
+        if args.as_json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(f"[surface: room={room}, "
+                  f"threshold={settings.surface_threshold}]")
+            print()
+            if not result["candidates"]:
+                print("  (候補なし)")
+            for c in result["candidates"]:
+                mark = "◎ 浮上" if c["id"] in result["surfaced"] else "  沈黙"
+                print(f"{mark}  {c['id']}  score={c['score']:.4f} "
+                      f"(rel={c['relevance']:.4f} act={c['activation']:.4f} "
+                      f"imp={c['importance']}) [{c['type']}/{c['room']}]")
+                preview = " ".join(c["content"].split())[:80]
+                print(f"        > {preview}")
+        return
+
     # エンジン構築
     engine = _build_engine(fake_embedder=args.fake_embedder)
 
@@ -294,6 +366,12 @@ def main() -> None:
             if args.related_ids
             else None
         )
+        from pathlib import Path
+
+        from .config import resolve_room
+        room = args.room or resolve_room(
+            Path.cwd(), engine.settings.room_paths
+        )
         result = engine.remember(
             content=args.content,
             type=args.type,
@@ -301,17 +379,25 @@ def main() -> None:
             tags=tags,
             source=args.source,
             related_ids=related_ids,
+            room=room,
         )
         _print_result(result, as_json=args.as_json)
 
     elif args.command == "recall":
         mode = "deep" if args.deep else "fast"
+        from pathlib import Path
+
+        from .config import resolve_room
+        room = args.room or resolve_room(
+            Path.cwd(), engine.settings.room_paths
+        )
         result = engine.recall(
             query=args.query,
             mode=mode,
             limit=args.limit,
             type=args.type,
             record_hits=not args.no_record,
+            room=room,
         )
         _print_recall(result, as_json=args.as_json)
 

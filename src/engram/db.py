@@ -54,6 +54,9 @@ class IndexDB:
 
         # WAL mode
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # MCP サーバーとフック(session-end)が同時に書く場合に備え、
+        # ロック競合は即エラーにせず最大5秒待つ
+        self._conn.execute("PRAGMA busy_timeout=5000")
 
         self._init_schema()
 
@@ -90,9 +93,19 @@ class IndexDB:
                     content_hash TEXT,
                     created_at REAL,
                     importance INTEGER,
-                    tier TEXT
+                    tier TEXT,
+                    room TEXT DEFAULT 'common'
                 )"""
             )
+            # 旧スキーマ(v0.2 以前)からのマイグレーション: room 列が無ければ追加
+            cols = {
+                r["name"]
+                for r in self._conn.execute("PRAGMA table_info(memories)")
+            }
+            if "room" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE memories ADD COLUMN room TEXT DEFAULT 'common'"
+                )
 
             # vec0 virtual table
             self._conn.execute(
@@ -149,6 +162,7 @@ class IndexDB:
         tier: str,
         content: str,
         embedding: np.ndarray,
+        room: str = "common",
     ) -> None:
         """memories / vec_memories / fts_memories を一括 upsert(同一トランザクション)。"""
         emb = np.asarray(embedding, dtype=np.float32)
@@ -158,16 +172,18 @@ class IndexDB:
             # memories: upsert
             self._conn.execute(
                 """INSERT INTO memories(id, path, type, content_hash,
-                    created_at, importance, tier)
-                   VALUES (?,?,?,?,?,?,?)
+                    created_at, importance, tier, room)
+                   VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                        path=excluded.path,
                        type=excluded.type,
                        content_hash=excluded.content_hash,
                        created_at=excluded.created_at,
                        importance=excluded.importance,
-                       tier=excluded.tier""",
-                (id, path, type, content_hash, created_at, importance, tier),
+                       tier=excluded.tier,
+                       room=excluded.room""",
+                (id, path, type, content_hash, created_at, importance, tier,
+                 room),
             )
 
             # vec_memories: vec0 doesn't support UPSERT reliably → DELETE+INSERT
@@ -231,6 +247,7 @@ class IndexDB:
         *,
         tiers: list[str] | None = None,
         types: list[str] | None = None,
+        rooms: list[str] | None = None,
     ) -> list[dict]:
         sql = "SELECT * FROM memories"
         params: list = []
@@ -243,6 +260,10 @@ class IndexDB:
             placeholders = ",".join("?" * len(types))
             conditions.append(f"type IN ({placeholders})")
             params.extend(types)
+        if rooms:
+            placeholders = ",".join("?" * len(rooms))
+            conditions.append(f"room IN ({placeholders})")
+            params.extend(rooms)
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         rows = self._conn.execute(sql, params).fetchall()
@@ -372,13 +393,14 @@ class IndexDB:
         *,
         tiers: list[str] | None = None,
         types: list[str] | None = None,
+        rooms: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """(id, cosine類似度) を類似度降順で k 件。フィルタはオーバーフェッチ+JOIN。"""
         emb = np.asarray(embedding, dtype=np.float32)
         emb_bytes = emb.tobytes()
 
         # Overfetch factor: larger when filters are active
-        overfetch = k * 8 if (tiers or types) else k * 4
+        overfetch = k * 8 if (tiers or types or rooms) else k * 4
         overfetch = max(overfetch, k)
 
         try:
@@ -406,6 +428,10 @@ class IndexDB:
             type_ph = ",".join("?" * len(types))
             filter_sql += f" AND type IN ({type_ph})"
             filter_params.extend(types)
+        if rooms:
+            room_ph = ",".join("?" * len(rooms))
+            filter_sql += f" AND room IN ({room_ph})"
+            filter_params.extend(rooms)
         allowed = {
             r["id"]
             for r in self._conn.execute(filter_sql, filter_params).fetchall()
@@ -430,6 +456,7 @@ class IndexDB:
         *,
         tiers: list[str] | None = None,
         types: list[str] | None = None,
+        rooms: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """FTS5(trigram) BM25。(id, スコア) をランク順で k 件。
 
@@ -455,7 +482,7 @@ class IndexDB:
                    WHERE f.content MATCH ?
                    ORDER BY score
                    LIMIT ?""",
-                (fts_query, k * 4 if (tiers or types) else k),
+                (fts_query, k * 4 if (tiers or types or rooms) else k),
             ).fetchall()
         except sqlite3.OperationalError:
             return []
@@ -463,8 +490,8 @@ class IndexDB:
         if not rows:
             return []
 
-        # Apply tier/type filters if needed
-        if tiers or types:
+        # Apply tier/type/room filters if needed
+        if tiers or types or rooms:
             candidate_ids = [r["memory_id"] for r in rows]
             placeholders = ",".join("?" * len(candidate_ids))
             filter_params: list = list(candidate_ids)
@@ -479,6 +506,10 @@ class IndexDB:
                 type_ph = ",".join("?" * len(types))
                 filter_sql += f" AND type IN ({type_ph})"
                 filter_params.extend(types)
+            if rooms:
+                room_ph = ",".join("?" * len(rooms))
+                filter_sql += f" AND room IN ({room_ph})"
+                filter_params.extend(rooms)
             allowed = {
                 r["id"]
                 for r in self._conn.execute(
@@ -520,6 +551,13 @@ class IndexDB:
             ).fetchall()
         }
 
+        by_room = {
+            r["room"]: r["cnt"]
+            for r in self._conn.execute(
+                "SELECT room, COUNT(*) AS cnt FROM memories GROUP BY room"
+            ).fetchall()
+        }
+
         event_count = self._conn.execute(
             "SELECT COUNT(*) AS cnt FROM access_events"
         ).fetchone()["cnt"]
@@ -535,6 +573,7 @@ class IndexDB:
             "total_memories": total,
             "by_type": by_type,
             "by_tier": by_tier,
+            "by_room": by_room,
             "event_count": event_count,
             "links_by_kind": links_by_kind,
         }

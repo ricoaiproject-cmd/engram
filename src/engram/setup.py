@@ -37,20 +37,32 @@ def read_config_toml(config_file: Path) -> dict[str, Any]:
         return {}
 
 
+def _toml_scalar(value: Any) -> str:
+    """スカラー値の TOML 表現。文字列はシングルクォート(エスケープ不要が利点)。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return f"'{value}'"
+
+
 def write_config_toml(config_file: Path, data: dict[str, Any]) -> None:
-    """dict を config.toml に書き出す。文字列値はシングルクォート。他キーは保持。"""
+    """dict を config.toml に書き出す。
+
+    スカラー値はトップレベルに、dict 値は [セクション] として書き出す
+    (例: room_paths)。セクションのキーはパス等を含むためクォートする。
+    """
     config_file.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
+    lines: list[str] = []
+    sections: list[str] = []
     for key, value in data.items():
-        if isinstance(value, str):
-            lines.append(f"{key} = '{value}'\n")
-        elif isinstance(value, bool):
-            lines.append(f"{key} = {'true' if value else 'false'}\n")
-        elif isinstance(value, (int, float)):
-            lines.append(f"{key} = {value}\n")
+        if isinstance(value, dict):
+            sections.append(f"\n[{key}]\n")
+            for k, v in value.items():
+                sections.append(f"'{k}' = {_toml_scalar(v)}\n")
         else:
-            lines.append(f"{key} = '{value}'\n")
-    config_file.write_text("".join(lines), encoding="utf-8")
+            lines.append(f"{key} = {_toml_scalar(value)}\n")
+    config_file.write_text("".join(lines + sections), encoding="utf-8")
 
 
 def merge_config_toml(config_file: Path, updates: dict[str, Any]) -> None:
@@ -167,6 +179,91 @@ def register_claude_mcp(engram_mcp_path: Path) -> tuple[bool, str]:
             return True, "登録完了"
         else:
             return False, f"登録失敗(exit {result.returncode}): {result.stderr.strip()}"
+    except Exception as e:
+        return False, f"登録失敗: {e}"
+
+
+def get_engram_cli_path() -> Path | None:
+    """engram CLI 本体のパスを返す(フック登録に使う)。見つからなければ None。"""
+    exe_dir = Path(sys.executable).parent
+    for name in ("engram.exe", "engram"):
+        candidate = exe_dir / name
+        if candidate.is_file():
+            return candidate
+    found = shutil.which("engram")
+    if found:
+        return Path(found)
+    return None
+
+
+#: Claude Code に登録するフック: (イベント名, engram hook の引数, タイムアウト秒)
+_CLAUDE_HOOK_EVENTS: list[tuple[str, str, int]] = [
+    ("SessionEnd", "session-end", 180),      # モデルロード+要約があるため長め
+    ("UserPromptSubmit", "user-prompt", 15),  # 軽量経路。プロンプトを待たせない
+]
+
+
+def _is_engram_hook_cmd(command: str) -> bool:
+    """既存のフックコマンドが engram のものか判定する(更新・冪等化用)。"""
+    return "engram" in command and " hook " in f"{command} "
+
+
+def register_claude_hooks(
+    settings_path: Path,
+    engram_cli: Path,
+) -> tuple[bool, str]:
+    """~/.claude/settings.json に自動符号化・自発的想起のフックを登録する。冪等。
+
+    - 既に同じコマンドが登録済みならスキップ
+    - engram のフックだがパスが古い場合は更新
+    - engram 以外のフックには触れない
+    - 壊れた JSON は変更しない(破壊的変更をしない)
+    """
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        if settings_path.is_file():
+            raw = settings_path.read_text(encoding="utf-8")
+            if raw.strip() == "":
+                data: dict = {}
+            else:
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    return False, "既存の settings.json が解析できないため変更しません(手動で修復してください)"
+        else:
+            data = {}
+
+        hooks = data.setdefault("hooks", {})
+        changed = []
+        for event, hook_arg, timeout in _CLAUDE_HOOK_EVENTS:
+            command = f'"{engram_cli}" hook {hook_arg}'
+            entries = hooks.setdefault(event, [])
+            found = False
+            for entry in entries:
+                for h in entry.get("hooks", []):
+                    if _is_engram_hook_cmd(h.get("command", "")):
+                        found = True
+                        if h.get("command") != command:
+                            h["command"] = command
+                            changed.append(f"{event}(パス更新)")
+                        h.setdefault("timeout", timeout)
+            if not found:
+                entries.append({
+                    "hooks": [{
+                        "type": "command",
+                        "command": command,
+                        "timeout": timeout,
+                    }]
+                })
+                changed.append(event)
+
+        if not changed:
+            return True, "既登録(スキップ)"
+        settings_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return True, f"登録完了({', '.join(changed)})"
     except Exception as e:
         return False, f"登録失敗: {e}"
 
@@ -469,6 +566,11 @@ def setup_main(
         print(f"  memories_dir: {chosen_dir}")
         results.append(("設定ファイル作成", True, str(cfg_path)))
 
+    # 自発的想起のモードを明示しておく(既定: shadow=ログのみで様子見)
+    if "surface_mode" not in read_config_toml(cfg_path):
+        merge_config_toml(cfg_path, {"surface_mode": "shadow"})
+        print("  surface_mode: shadow(自発的想起はまずログのみで観察)")
+
     chosen_dir = Path(existing_cfg.get("memories_dir", chosen_dir)).expanduser().resolve() \
         if "memories_dir" in existing_cfg and memories_dir is None else chosen_dir.expanduser().resolve()
 
@@ -590,6 +692,20 @@ def setup_main(
             ok2, msg2 = update_claude_md(_claude_md, home / "MEMORY_PROTOCOL.md")
             results.append(("CLAUDE.md 更新", ok2, msg2))
             print(f"  CLAUDE.md 更新: {msg2}")
+
+            # フック登録(自動符号化 + 自発的想起)
+            engram_cli = get_engram_cli_path()
+            if engram_cli is not None:
+                ok3, msg3 = register_claude_hooks(
+                    _claude_md.parent / "settings.json", engram_cli
+                )
+                results.append(("Claude Code フック登録", ok3, msg3))
+                print(f"  Claude Code フック登録: {msg3}")
+                print("    - セッション終了時の自動記憶(SessionEnd)")
+                print("    - 関連記憶の自発的想起(UserPromptSubmit、まずは影モード)")
+            else:
+                results.append(("Claude Code フック登録", False, "engram CLI が見つかりません"))
+                print("  Claude Code フック登録: engram CLI が見つかりません")
         else:
             # --agents で明示指定されたが未検出
             print("  Claude Code: 未検出(インストールされていれば後で `engram setup` を再実行)")
@@ -818,6 +934,48 @@ def doctor_main(
             str(claude_md) if has_engram else f"未追記: {claude_md}")
     else:
         row("CLAUDE.md engram 組み込み", "[--]", f"ファイルなし: {claude_md}")
+
+    # フック登録(自動符号化・自発的想起)
+    claude_settings = Path.home() / ".claude" / "settings.json"
+    if claude_settings.is_file():
+        try:
+            sdata = json.loads(
+                claude_settings.read_text(encoding="utf-8", errors="replace")
+            )
+            hk = sdata.get("hooks", {})
+
+            def _has_engram_hook(event: str) -> bool:
+                for entry in hk.get(event, []):
+                    for h in entry.get("hooks", []):
+                        if _is_engram_hook_cmd(h.get("command", "")):
+                            return True
+                return False
+
+            se = _has_engram_hook("SessionEnd")
+            up = _has_engram_hook("UserPromptSubmit")
+            row("自動符号化フック(SessionEnd)", "[OK]" if se else "[NG]",
+                "登録済み" if se else "未登録(`engram setup` を実行してください)")
+            row("自発的想起フック(UserPromptSubmit)", "[OK]" if up else "[NG]",
+                "登録済み" if up else "未登録(`engram setup` を実行してください)")
+        except Exception:
+            row("フック登録", "[NG]", "settings.json 読み取りエラー")
+    else:
+        row("フック登録", "[--]", f"ファイルなし: {claude_settings}")
+
+    # 自発的想起の動作モードとログ
+    try:
+        _settings = get_settings()
+        mode = _settings.surface_mode
+        surface_log = _settings.data_dir / "surface" / "surface_log.jsonl"
+        if surface_log.is_file():
+            with surface_log.open("r", encoding="utf-8", errors="replace") as f:
+                n_log = sum(1 for _ in f)
+            detail = f"ログ {n_log} 件"
+        else:
+            detail = "ログなし"
+        row("surface_mode", "[OK]", f"{mode}({detail})")
+    except Exception:
+        row("surface_mode", "[NG]", "設定読み取りエラー")
 
     print()
 

@@ -17,14 +17,21 @@ mcp 公式 SDK の FastMCP(stdio)で engine の操作をツールとして公開
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP
 
+from .config import resolve_room
 from .engine import MemoryEngine, build_engine
 
 mcp = FastMCP("engram")
 
 # モジュールレベル遅延シングルトン(初回ツール呼び出しで構築)
 _engine: MemoryEngine | None = None
+
+# サーバーの既定の部屋。プロセス起動時の作業ディレクトリ(=エージェントを
+# 起動したプロジェクト)から config の room_paths で決まる
+_room: str | None = None
 
 
 def _get_engine() -> MemoryEngine:
@@ -35,6 +42,18 @@ def _get_engine() -> MemoryEngine:
     return _engine
 
 
+def _default_room() -> str:
+    """サーバー起動ディレクトリから記憶の部屋を解決する(初回のみ計算)。"""
+    global _room
+    if _room is None:
+        try:
+            settings = _get_engine().settings
+            _room = resolve_room(Path.cwd(), settings.room_paths)
+        except Exception:
+            _room = "common"
+    return _room
+
+
 @mcp.tool()
 def remember(
     content: str,
@@ -43,12 +62,15 @@ def remember(
     tags: list[str] | None = None,
     source: str = "unknown",
     related_ids: list[str] | None = None,
+    room: str | None = None,
 ) -> dict:
     """新しい記憶を保存する。
 
     タスク中に重要な情報(事実・好み・プロジェクト状況・出来事)を発見したとき呼ぶ。
     importance は 1〜10 で文脈の重要度を自己採点する。
     既存の類似記憶(cos ≥ 0.92)がある場合は重複強化して返す。
+    room は通常指定不要(作業ディレクトリから自動判定)。どの文脈でも使う
+    普遍的な記憶だけ room="common" を明示する。
     """
     engine = _get_engine()
     return engine.remember(
@@ -58,6 +80,7 @@ def remember(
         tags=tags,
         source=source,
         related_ids=related_ids,
+        room=room if room is not None else _default_room(),
     )
 
 
@@ -68,12 +91,15 @@ def recall(
     limit: int = 5,
     type: str | None = None,
     record_hits: bool = True,
+    room: str | None = None,
 ) -> dict:
     """記憶を検索して返す。
 
     タスク開始時に必ず呼ぶ。関連する過去の知識・好み・プロジェクト状況を想起できる。
     mode="fast" は tier=hot のみ高速検索。スコアが低いと自動で deep に切り替わる。
     mode="deep" は cold/superseded/episode も含め連想リンクを辿って広く探す。
+    room は通常指定不要(現在の部屋+共通だけを検索する)。room="*" で全部屋を
+    横断検索できるが、仕事/個人の分離を壊さないよう必要時のみ使うこと。
     """
     engine = _get_engine()
     return engine.recall(
@@ -82,6 +108,7 @@ def recall(
         limit=limit,
         type=type,
         record_hits=record_hits,
+        room=room if room is not None else _default_room(),
     )
 
 

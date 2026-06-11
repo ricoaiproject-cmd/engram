@@ -38,6 +38,7 @@ class MemoryEngine:
         tags: list[str] | None = None,
         source: str = "unknown",
         related_ids: list[str] | None = None,
+        room: str | None = None,
         now: float | None = None,
     ) -> dict:
         """保存。手順:
@@ -56,15 +57,17 @@ class MemoryEngine:
         """
         ts = now if now is not None else time.time()
         tags = list(tags) if tags else []
+        room = room or "common"
 
         # correction タグがある場合 importance を引き上げる
         if "correction" in tags:
             importance = max(importance, self.settings.correction_min_importance)
 
-        # 1. 重複検知: 同タイプ・tier=hot で top1 ベクトル検索
+        # 1. 重複検知: 同タイプ・同部屋・tier=hot で top1 ベクトル検索
+        #    (部屋を跨いだ併合は文脈分離を壊すので同部屋に限定する)
         vec = self.embedder.embed_docs([content])[0]
         candidates = self.db.vector_search(
-            vec, 1, tiers=["hot"], types=[type]
+            vec, 1, tiers=["hot"], types=[type], rooms=[room]
         )
         if candidates:
             top_id, top_cos = candidates[0]
@@ -82,6 +85,7 @@ class MemoryEngine:
             tags=tags,
             source=source,
             links=related_ids or [],
+            room=room,
         )
 
         self.db.upsert_memory(
@@ -94,6 +98,7 @@ class MemoryEngine:
             tier=record.tier,
             content=content,
             embedding=vec,
+            room=record.room,
         )
 
         # 3. create イベントを初期符号化ブーストで記録
@@ -124,6 +129,7 @@ class MemoryEngine:
         mode: str = "fast",        # "fast" | "deep"
         limit: int = 5,
         type: str | None = None,
+        room: str | None = None,   # None/"*"=全部屋。指定時は {room, common} に限定
         now: float | None = None,
         record_hits: bool = True,
     ) -> dict:
@@ -151,8 +157,14 @@ class MemoryEngine:
         ts = now if now is not None else time.time()
         auto_deepened = False
 
+        # 部屋フィルタ: 指定された部屋 + 共通(common)だけを見る
+        rooms: list[str] | None = None
+        if room is not None and room != "*":
+            rooms = sorted({room, "common"})
+
         # fast モードでの検索
-        hits, best_score = self._fast_recall(query, limit=limit, type=type, now=ts)
+        hits, best_score = self._fast_recall(query, limit=limit, type=type,
+                                             rooms=rooms, now=ts)
 
         # 最高スコアが閾値未満なら deep を自動発動
         if mode == "fast" and best_score < self.settings.deep_score_threshold:
@@ -160,7 +172,8 @@ class MemoryEngine:
             auto_deepened = True
 
         if mode == "deep":
-            hits = self._deep_recall(query, fast_hits=hits, limit=limit, type=type, now=ts)
+            hits = self._deep_recall(query, fast_hits=hits, limit=limit, type=type,
+                                     rooms=rooms, now=ts)
 
         # recall_hit イベントを記録
         if record_hits:
@@ -180,6 +193,7 @@ class MemoryEngine:
         *,
         limit: int,
         type: str | None,
+        rooms: list[str] | None = None,
         now: float,
     ) -> tuple[list[RecallHit], float]:
         """fast recall の内部実装。(hits, best_score) を返す。"""
@@ -199,10 +213,10 @@ class MemoryEngine:
 
         # ベクトル検索 + キーワード検索
         vec_results = self.db.vector_search(
-            qvec, k, tiers=search_tiers, types=search_types
+            qvec, k, tiers=search_tiers, types=search_types, rooms=rooms
         )
         kw_results = self.db.keyword_search(
-            query, k, tiers=search_tiers, types=search_types
+            query, k, tiers=search_tiers, types=search_types, rooms=rooms
         )
 
         # ベクトル類似度マップ
@@ -227,7 +241,8 @@ class MemoryEngine:
         candidate_ids = list(merged.keys())
         events_map = self.db.get_events(candidate_ids)
         # importance を取得
-        mem_rows = {m["id"]: m for m in self.db.all_memories(tiers=search_tiers, types=search_types)}
+        mem_rows = {m["id"]: m for m in self.db.all_memories(
+            tiers=search_tiers, types=search_types, rooms=rooms)}
 
         scored: list[tuple[float, str]] = []
         for id_ in candidate_ids:
@@ -281,6 +296,7 @@ class MemoryEngine:
                 activation=act,
                 importance=imp / 10.0,
                 via="direct",
+                room=mem.get("room", "common"),
             )
             hits.append(hit)
             if score > best_score:
@@ -295,23 +311,24 @@ class MemoryEngine:
         fast_hits: list[RecallHit],
         limit: int,
         type: str | None,
+        rooms: list[str] | None = None,
         now: float,
     ) -> list[RecallHit]:
         """deep recall: tier=cold/superseded・episode も含め再検索 + 拡散活性化。"""
         s = self.settings
         k = s.candidate_k
 
-        # deep は全 tier、全 type を対象
+        # deep は全 tier、全 type を対象(部屋フィルタは維持する)
         search_tiers = ["hot", "cold", "superseded"]
         search_types = [type] if type is not None else None
 
         qvec = self.embedder.embed_query(query)
 
         vec_results = self.db.vector_search(
-            qvec, k, tiers=search_tiers, types=search_types
+            qvec, k, tiers=search_tiers, types=search_types, rooms=rooms
         )
         kw_results = self.db.keyword_search(
-            query, k, tiers=search_tiers, types=search_types
+            query, k, tiers=search_tiers, types=search_types, rooms=rooms
         )
 
         vec_sim: dict[str, float] = {id_: sim for id_, sim in vec_results}
@@ -359,9 +376,10 @@ class MemoryEngine:
                 cos = float(np.dot(qvec, emb))
                 vec_sim[id_] = max(0.0, cos)
 
-        # 全候補の importance を取得
+        # 全候補の importance を取得。rooms フィルタ付きなので、拡散活性化で
+        # 他の部屋に到達してもここで弾かれる(連想経由の部屋漏れ防止)
         all_mem_rows = {m["id"]: m for m in self.db.all_memories(
-            tiers=search_tiers, types=search_types
+            tiers=search_tiers, types=search_types, rooms=rooms
         )}
 
         events_map = self.db.get_events(list(all_ids))
@@ -434,6 +452,7 @@ class MemoryEngine:
                 importance=imp / 10.0,
                 via=via,
                 note=note,
+                room=mem.get("room", "common"),
             )
             hits.append(hit)
 
@@ -541,6 +560,7 @@ class MemoryEngine:
             tags=new_tags,
             source=source,
             related_ids=[id],
+            room=old_record.room,
             now=ts,
         )
         new_id = new_result["id"]
@@ -567,6 +587,7 @@ class MemoryEngine:
         tags: list[str] | None = None,
         source: str = "unknown",
         related_ids: list[str] | None = None,
+        room: str = "common",
         now: float,
     ) -> dict:
         """重複検知をスキップした記憶の直接保存(correct から呼ぶ)。"""
@@ -582,6 +603,7 @@ class MemoryEngine:
             tags=tags,
             source=source,
             links=related_ids or [],
+            room=room,
         )
 
         self.db.upsert_memory(
@@ -594,6 +616,7 @@ class MemoryEngine:
             tier=record.tier,
             content=content,
             embedding=vec,
+            room=record.room,
         )
 
         create_weight = dynamics.create_event_weight(
@@ -775,6 +798,7 @@ class MemoryEngine:
                     tier=record.tier,
                     content=record.content,
                     embedding=vec,
+                    room=record.room,
                 )
                 # イベントが無い(=ゼロから再構築した)場合は create イベントを
                 # 再シードする。これが無いと再構築後の活性度が全件 0 になる
@@ -788,8 +812,9 @@ class MemoryEngine:
                         created_at,
                     )
                 added += 1
-            elif db_mem.get("content_hash", "") != record.content_hash:
-                # 手編集で差異あり: 再埋め込みして upsert
+            elif (db_mem.get("content_hash", "") != record.content_hash
+                  or db_mem.get("room", "common") != record.room):
+                # 手編集で差異あり(本文または room): 再埋め込みして upsert
                 vec = self.embedder.embed_docs([record.content])[0]
                 self.db.upsert_memory(
                     id=record.id,
@@ -801,6 +826,7 @@ class MemoryEngine:
                     tier=record.tier,
                     content=record.content,
                     embedding=vec,
+                    room=record.room,
                 )
                 updated += 1
             else:
@@ -869,4 +895,5 @@ def _hit_to_dict(hit: RecallHit) -> dict:
         "importance": hit.importance,
         "via": hit.via,
         "note": hit.note,
+        "room": hit.room,
     }

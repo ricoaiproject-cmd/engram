@@ -71,6 +71,25 @@ class Settings:
     consolidate_min_age_days: int = 14
     consolidate_cluster_sim: float = 0.75
 
+    # --- 自動符号化(セッション終了フック)---
+    auto_encode: bool = True             # SessionEnd フックでの自動 episode 保存
+    auto_episode_importance: int = 3     # 自動要約 episode の importance(粗い記録なので低め)
+    auto_encode_min_chars: int = 16      # ユーザー発言の合計がこれ未満のセッションは記録しない
+
+    # --- 自発的想起(surface)---
+    surface_mode: str = "shadow"         # off | shadow(ログのみ) | active(文脈に差し込む)
+    surface_threshold: float = 0.45      # このスコア以上の記憶だけ浮上する
+    # 関連度の最低ライン(ゲート)。活性度・重要度がいくら高くても、発話との
+    # 字句関連がこれ未満なら浮上しない。よく使う重要な記憶が無関係な文脈に
+    # 出しゃばる事故を防ぐ(実データで閾値ぎりぎりまで来た実例があった)
+    surface_min_relevance: float = 0.25
+    surface_max_items: int = 2           # 1プロンプトで差し込む最大件数
+    surface_min_prompt_chars: int = 8    # これより短い発言では想起しない
+
+    # --- 記憶の部屋(仕事/個人の文脈分離)---
+    # {ディレクトリのプレフィックス: 部屋名}。最長一致で判定、該当なしは "common"
+    room_paths: dict = field(default_factory=dict)
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "index.db"
@@ -117,3 +136,24 @@ def get_settings() -> Settings:
             overrides[key] = Path(value) if key in _PATH_FIELDS else value
 
     return Settings(**overrides)
+
+
+def resolve_room(cwd: str | Path | None, room_paths: dict) -> str:
+    """作業ディレクトリから記憶の部屋を決める。
+
+    room_paths のキー(ディレクトリのプレフィックス)と最長一致で照合する。
+    区切り文字(\\ と /)と大文字小文字の差は吸収する。該当なしは "common"。
+    """
+    if not cwd or not room_paths:
+        return "common"
+    norm = str(cwd).replace("\\", "/").casefold().rstrip("/")
+    best_len = -1
+    best_room = "common"
+    for prefix, room in room_paths.items():
+        p = str(prefix).replace("\\", "/").casefold().rstrip("/")
+        if not p:
+            continue
+        if (norm == p or norm.startswith(p + "/")) and len(p) > best_len:
+            best_len = len(p)
+            best_room = str(room)
+    return best_room

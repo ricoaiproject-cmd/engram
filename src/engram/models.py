@@ -26,6 +26,7 @@ class MemoryRecord:
     content: str = ""            # 本文(frontmatter を除く)
     path: Path | None = None     # Markdown ファイルの絶対パス
     content_hash: str = ""       # 本文の sha256(手編集検知用)
+    room: str = "common"         # 記憶の部屋(仕事/個人の文脈分離。既定は共通)
 
 
 @dataclass
@@ -43,3 +44,4 @@ class RecallHit:
     importance: float            # importance/10
     via: str = "direct"          # "direct" | "associative"(連想リンク経由)
     note: str = ""               # 例: "→ [id] により訂正済み"
+    room: str = "common"         # 記憶の部屋
