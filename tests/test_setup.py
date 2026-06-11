@@ -14,9 +14,11 @@ import pytest
 from engram.setup import (
     copy_templates,
     merge_config_toml,
+    parse_agents,
     read_config_toml,
     register_codex,
     register_gemini_mcp,
+    setup_main,
     update_agents_md,
     update_claude_md,
     update_gemini_md,
@@ -416,3 +418,175 @@ class TestCopyTemplates:
         assert not dest.exists()
         copy_templates(dest)
         assert dest.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# parse_agents
+# ---------------------------------------------------------------------------
+
+class TestParseAgents:
+    # --- 正常系 ---
+    def test_single_claude(self):
+        assert parse_agents("claude") == {"claude"}
+
+    def test_multiple_claude_codex(self):
+        assert parse_agents("claude,codex") == {"claude", "codex"}
+
+    def test_antigravity_alias_normalized_to_gemini(self):
+        assert parse_agents("Antigravity") == {"gemini"}
+
+    def test_gemini_key(self):
+        assert parse_agents("gemini") == {"gemini"}
+
+    def test_all_three(self):
+        assert parse_agents("claude,codex,gemini") == {"claude", "codex", "gemini"}
+
+    def test_whitespace_around_commas(self):
+        assert parse_agents("claude , codex") == {"claude", "codex"}
+
+    def test_uppercase_claude(self):
+        assert parse_agents("CLAUDE") == {"claude"}
+
+    def test_mixed_case_codex(self):
+        assert parse_agents("CoDex") == {"codex"}
+
+    def test_antigravity_mixed_case(self):
+        assert parse_agents("ANTIGRAVITY") == {"gemini"}
+
+    # --- 異常系 ---
+    def test_invalid_name_raises_value_error(self):
+        with pytest.raises(ValueError) as exc_info:
+            parse_agents("unknown")
+        msg = str(exc_info.value)
+        assert "unknown" in msg
+        # エラーメッセージに有効名が含まれること
+        assert "claude" in msg
+        assert "codex" in msg
+
+    def test_partially_invalid_raises_value_error(self):
+        with pytest.raises(ValueError) as exc_info:
+            parse_agents("claude,bad_agent")
+        msg = str(exc_info.value)
+        assert "bad_agent" in msg
+        assert "claude" in msg  # 有効名の一覧が含まれる
+
+    def test_valid_names_listed_in_error(self):
+        """エラーメッセージにすべての有効エイリアスが含まれること。"""
+        with pytest.raises(ValueError) as exc_info:
+            parse_agents("nope")
+        msg = str(exc_info.value)
+        for valid in ("claude", "codex", "gemini", "antigravity"):
+            assert valid in msg
+
+
+# ---------------------------------------------------------------------------
+# setup_main の agents フィルタ
+# ---------------------------------------------------------------------------
+
+class TestSetupMainAgentsFilter:
+    """実コマンドを実行せず、パス注入でファイルへの副作用だけを検証する。
+
+    shutil.which を None 固定にして claude は常に「未検出」にする。
+    codex / gemini は tmp_path 配下のディレクトリ有無で制御する。
+    """
+
+    @pytest.fixture()
+    def patch_which_none(self, monkeypatch):
+        """shutil.which を常に None を返すようにパッチ。"""
+        import shutil as _shutil
+        import engram.setup as setup_mod
+        monkeypatch.setattr(setup_mod.shutil, "which", lambda *a, **kw: None)
+
+    @pytest.fixture()
+    def fake_engram_mcp(self, tmp_path):
+        """偽の engram-mcp 実行可能ファイルを作成し、get_engram_mcp_path をパッチ。"""
+        import engram.setup as setup_mod
+        mcp = tmp_path / "engram-mcp.exe"
+        mcp.write_bytes(b"")
+        return mcp
+
+    def _run_setup(self, tmp_path, monkeypatch, fake_mcp, agents, non_interactive=True):
+        """setup_main を最小限の引数で呼び出す共通ヘルパー。"""
+        import engram.setup as setup_mod
+
+        # engram_home / config 周りを tmp_path に向ける
+        engram_home = tmp_path / "engram_home"
+        engram_home.mkdir(parents=True, exist_ok=True)
+        config_file = engram_home / "config.toml"
+        claude_md = tmp_path / "claude_md" / "CLAUDE.md"
+        codex_dir = tmp_path / "codex"
+        gemini_dir = tmp_path / "gemini"
+
+        # codex / gemini ディレクトリを作る(存在=「検出済み」扱い)
+        codex_dir.mkdir()
+        (gemini_dir / "config").mkdir(parents=True)
+
+        # engram-mcp の検索をパッチ
+        monkeypatch.setattr(setup_mod, "get_engram_mcp_path", lambda: fake_mcp)
+
+        # MarkdownStore / embedder / build_engine はスキップさせるため
+        # RuriEmbedder をパッチして即 raise させる
+        import engram.embedder as emb_mod
+        monkeypatch.setattr(emb_mod, "RuriEmbedder", lambda: (_ for _ in ()).throw(RuntimeError("skip")))
+
+        setup_main(
+            memories_dir=tmp_path / "memories",
+            non_interactive=non_interactive,
+            agents=agents,
+            engram_home=engram_home,
+            config_file=config_file,
+            claude_md_path=claude_md,
+            codex_dir=codex_dir,
+            gemini_dir=gemini_dir,
+        )
+        return codex_dir, gemini_dir
+
+    def test_agents_codex_only_writes_codex_not_gemini(
+        self, tmp_path, monkeypatch, patch_which_none, fake_engram_mcp
+    ):
+        """agents={"codex"} のとき codex だけ書かれ gemini は変更なし。"""
+        codex_dir, gemini_dir = self._run_setup(
+            tmp_path, monkeypatch, fake_engram_mcp, agents={"codex"}
+        )
+        # codex の config.toml が作成されている
+        codex_cfg = codex_dir / "config.toml"
+        assert codex_cfg.is_file()
+        assert "[mcp_servers.engram]" in codex_cfg.read_text(encoding="utf-8")
+
+        # gemini の mcp_config.json は変更されていない(存在しない)
+        gemini_cfg = gemini_dir / "config" / "mcp_config.json"
+        assert not gemini_cfg.exists()
+
+    def test_agents_none_writes_all_detected(
+        self, tmp_path, monkeypatch, patch_which_none, fake_engram_mcp
+    ):
+        """agents=None(デフォルト)のとき検出された全エージェントに書き込む。
+        claude は which=None なのでスキップ。codex / gemini は書かれる。"""
+        codex_dir, gemini_dir = self._run_setup(
+            tmp_path, monkeypatch, fake_engram_mcp, agents=None
+        )
+        # codex が書かれている
+        codex_cfg = codex_dir / "config.toml"
+        assert codex_cfg.is_file()
+        assert "[mcp_servers.engram]" in codex_cfg.read_text(encoding="utf-8")
+
+        # gemini が書かれている
+        gemini_cfg = gemini_dir / "config" / "mcp_config.json"
+        assert gemini_cfg.is_file()
+        data = json.loads(gemini_cfg.read_text(encoding="utf-8"))
+        assert "engram" in data["mcpServers"]
+
+    def test_agents_gemini_only_writes_gemini_not_codex(
+        self, tmp_path, monkeypatch, patch_which_none, fake_engram_mcp
+    ):
+        """agents={"gemini"} のとき gemini だけ書かれ codex は変更なし。"""
+        codex_dir, gemini_dir = self._run_setup(
+            tmp_path, monkeypatch, fake_engram_mcp, agents={"gemini"}
+        )
+        gemini_cfg = gemini_dir / "config" / "mcp_config.json"
+        assert gemini_cfg.is_file()
+
+        codex_cfg = codex_dir / "config.toml"
+        # codex は書かれていないか、engram セクションがない
+        if codex_cfg.exists():
+            assert "[mcp_servers.engram]" not in codex_cfg.read_text(encoding="utf-8")

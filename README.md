@@ -70,6 +70,21 @@ engram setup
 
 何度実行しても安全(冪等)です。未登録のエージェントだけが追加されます。
 
+### 登録先のエージェントを選ぶ
+
+複数のエージェントが入っていても、engram を繋ぎたいものだけを選べます。
+
+```powershell
+# Claude Code だけに登録する
+engram setup --agents claude
+
+# Claude Code と Codex の両方に登録する
+engram setup --agents claude,codex
+```
+
+有効な名前: `claude` / `codex` / `gemini`(`antigravity` は `gemini` の別名)。
+`--agents` を省略した場合、対話モード(インタラクティブ)では検出されたエージェントが一覧表示され、番号で選べます。Enter を押すとすべてに登録されます。`--non-interactive` では従来どおり検出された全エージェントに自動登録されます。
+
 ---
 
 ## 記憶の仕組み

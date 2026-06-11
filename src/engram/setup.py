@@ -335,6 +335,66 @@ def update_gemini_md(
 
 
 # ---------------------------------------------------------------------------
+# エージェント選択ユーティリティ
+# ---------------------------------------------------------------------------
+
+#: 内部キー → 表示名
+_AGENT_DISPLAY: dict[str, str] = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "gemini": "Antigravity (Gemini)",
+}
+
+#: 入力エイリアス → 内部キー (小文字正規化済み)
+_AGENT_ALIASES: dict[str, str] = {
+    "claude": "claude",
+    "codex": "codex",
+    "gemini": "gemini",
+    "antigravity": "gemini",
+}
+
+_VALID_AGENT_KEYS = frozenset(_AGENT_DISPLAY.keys())
+
+
+def parse_agents(value: str) -> set[str]:
+    """カンマ区切りのエージェント名を内部キーの集合に変換する。
+
+    エイリアス: "antigravity" -> "gemini"(大文字小文字無視)。
+    不正な名前が含まれる場合は ValueError(有効名の一覧をメッセージに含める)。
+    """
+    valid_aliases = sorted(_AGENT_ALIASES.keys())
+    result: set[str] = set()
+    for raw in value.split(","):
+        token = raw.strip().lower()
+        if not token:
+            continue
+        if token not in _AGENT_ALIASES:
+            raise ValueError(
+                f"不明なエージェント名: '{raw.strip()}'\n"
+                f"有効な名前: {', '.join(valid_aliases)}"
+            )
+        result.add(_AGENT_ALIASES[token])
+    return result
+
+
+def _detect_agents(
+    codex_dir: Path | None = None,
+    gemini_dir: Path | None = None,
+) -> list[str]:
+    """現在の環境で検出できるエージェントの内部キーリストを返す。"""
+    _codex_dir = codex_dir if codex_dir is not None else Path.home() / ".codex"
+    _gemini_dir = gemini_dir if gemini_dir is not None else Path.home() / ".gemini"
+    detected: list[str] = []
+    if shutil.which("claude") is not None:
+        detected.append("claude")
+    if _codex_dir.is_dir():
+        detected.append("codex")
+    if _gemini_dir.is_dir():
+        detected.append("gemini")
+    return detected
+
+
+# ---------------------------------------------------------------------------
 # セットアップウィザード本体
 # ---------------------------------------------------------------------------
 
@@ -342,6 +402,7 @@ def setup_main(
     memories_dir: Path | None = None,
     non_interactive: bool = False,
     *,
+    agents: set[str] | None = None,
     # パス注入(テスト・カスタマイズ用)
     engram_home: Path | None = None,
     config_file: Path | None = None,
@@ -349,7 +410,11 @@ def setup_main(
     codex_dir: Path | None = None,
     gemini_dir: Path | None = None,
 ) -> None:
-    """セットアップウィザードのメイン処理。冪等。"""
+    """セットアップウィザードのメイン処理。冪等。
+
+    agents: 登録対象エージェントの内部キー集合("claude"/"codex"/"gemini")。
+            None = 従来どおり検出された全部。
+    """
     from .config import config_path as _config_path
     from .config import _engram_home as _get_engram_home
     from .config import get_settings
@@ -466,47 +531,115 @@ def setup_main(
     else:
         print(f"  engram-mcp: {engram_mcp}")
 
+    # --- エージェント選択 ---
+    _codex_dir = codex_dir if codex_dir is not None else Path.home() / ".codex"
+    _gemini_dir = gemini_dir if gemini_dir is not None else Path.home() / ".gemini"
+
+    # --agents で明示指定された場合は検出不問でそのまま使う
+    # 未指定 + 対話あり → 2件以上検出時に選択プロンプトを出す
+    # 未指定 + 非対話   → 検出された全部(従来どおり)
+    if agents is not None:
+        # --agents で明示: 指定集合をそのまま使用
+        selected_agents: set[str] = agents
+        detected_agents: list[str] = _detect_agents(_codex_dir, _gemini_dir)
+    else:
+        detected_agents = _detect_agents(_codex_dir, _gemini_dir)
+        if non_interactive or len(detected_agents) <= 1:
+            # 非対話 or 選択肢が1つ以下 → 全部
+            selected_agents = set(detected_agents)
+        else:
+            # 対話モード: 選択肢を提示
+            print()
+            print("  検出されたエージェント:")
+            for idx, key in enumerate(detected_agents, 1):
+                print(f"    [{idx}] {_AGENT_DISPLAY[key]}")
+            print("  登録先を選んでください(Enter=すべて / 番号をカンマ区切り 例: 1,3):")
+            try:
+                answer = input("  > ").strip()
+            except EOFError:
+                answer = ""
+            if not answer:
+                selected_agents = set(detected_agents)
+            else:
+                chosen: set[str] = set()
+                valid = True
+                for part in answer.split(","):
+                    part = part.strip()
+                    if not part.isdigit():
+                        print(f"  無効な入力: '{part}' — すべてのエージェントを登録します")
+                        valid = False
+                        break
+                    n = int(part)
+                    if 1 <= n <= len(detected_agents):
+                        chosen.add(detected_agents[n - 1])
+                    else:
+                        print(f"  番号が範囲外: {n} — すべてのエージェントを登録します")
+                        valid = False
+                        break
+                selected_agents = chosen if valid else set(detected_agents)
+            print()
+
     # --- Claude Code ---
     _claude_md = claude_md_path if claude_md_path is not None else Path.home() / ".claude" / "CLAUDE.md"
-    if shutil.which("claude") is not None and engram_mcp is not None:
-        ok, msg = register_claude_mcp(engram_mcp)
-        results.append(("Claude Code MCP 登録", ok, msg))
-        print(f"  Claude Code MCP 登録: {msg}")
+    if "claude" in selected_agents:
+        if shutil.which("claude") is not None and engram_mcp is not None:
+            ok, msg = register_claude_mcp(engram_mcp)
+            results.append(("Claude Code MCP 登録", ok, msg))
+            print(f"  Claude Code MCP 登録: {msg}")
 
-        ok2, msg2 = update_claude_md(_claude_md, home / "MEMORY_PROTOCOL.md")
-        results.append(("CLAUDE.md 更新", ok2, msg2))
-        print(f"  CLAUDE.md 更新: {msg2}")
+            ok2, msg2 = update_claude_md(_claude_md, home / "MEMORY_PROTOCOL.md")
+            results.append(("CLAUDE.md 更新", ok2, msg2))
+            print(f"  CLAUDE.md 更新: {msg2}")
+        else:
+            # --agents で明示指定されたが未検出
+            print("  Claude Code: 未検出(インストールされていれば後で `engram setup` を再実行)")
     else:
-        print("  Claude Code: 未検出(インストールされていれば後で `engram setup` を再実行)")
+        # selected_agents に含まれない理由を判定して表示
+        if "claude" in detected_agents:
+            # 検出されたが選択されなかった(対話/--agents で除外)
+            print(f"  {_AGENT_DISPLAY['claude']}: 選択外(スキップ)")
+        else:
+            # そもそも未検出(agents=None で従来どおり全部が対象だが存在しない)
+            print("  Claude Code: 未検出(インストールされていれば後で `engram setup` を再実行)")
 
     # --- Codex ---
-    _codex_dir = codex_dir if codex_dir is not None else Path.home() / ".codex"
-    if _codex_dir.is_dir() and engram_mcp is not None:
-        ok, msg = register_codex(_codex_dir / "config.toml", engram_mcp)
-        results.append(("Codex config.toml 更新", ok, msg))
-        print(f"  Codex config.toml 更新: {msg}")
+    if "codex" in selected_agents:
+        if _codex_dir.is_dir() and engram_mcp is not None:
+            ok, msg = register_codex(_codex_dir / "config.toml", engram_mcp)
+            results.append(("Codex config.toml 更新", ok, msg))
+            print(f"  Codex config.toml 更新: {msg}")
 
-        ok2, msg2 = update_agents_md(_codex_dir / "AGENTS.md", home / "MEMORY_PROTOCOL.md")
-        results.append(("Codex AGENTS.md 更新", ok2, msg2))
-        print(f"  Codex AGENTS.md 更新: {msg2}")
+            ok2, msg2 = update_agents_md(_codex_dir / "AGENTS.md", home / "MEMORY_PROTOCOL.md")
+            results.append(("Codex AGENTS.md 更新", ok2, msg2))
+            print(f"  Codex AGENTS.md 更新: {msg2}")
+        else:
+            print("  Codex: 未検出(インストールされていれば後で `engram setup` を再実行)")
     else:
-        print("  Codex: 未検出(インストールされていれば後で `engram setup` を再実行)")
+        if "codex" in detected_agents:
+            print(f"  {_AGENT_DISPLAY['codex']}: 選択外(スキップ)")
+        else:
+            print("  Codex: 未検出(インストールされていれば後で `engram setup` を再実行)")
 
     # --- Gemini / Antigravity ---
-    _gemini_dir = gemini_dir if gemini_dir is not None else Path.home() / ".gemini"
-    if _gemini_dir.is_dir() and engram_mcp is not None:
-        ok, msg = register_gemini_mcp(
-            _gemini_dir / "config" / "mcp_config.json",
-            engram_mcp,
-        )
-        results.append(("Gemini mcp_config.json 更新", ok, msg))
-        print(f"  Gemini mcp_config.json 更新: {msg}")
+    if "gemini" in selected_agents:
+        if _gemini_dir.is_dir() and engram_mcp is not None:
+            ok, msg = register_gemini_mcp(
+                _gemini_dir / "config" / "mcp_config.json",
+                engram_mcp,
+            )
+            results.append(("Gemini mcp_config.json 更新", ok, msg))
+            print(f"  Gemini mcp_config.json 更新: {msg}")
 
-        ok2, msg2 = update_gemini_md(_gemini_dir / "GEMINI.md", home / "MEMORY_PROTOCOL.md")
-        results.append(("Gemini GEMINI.md 更新", ok2, msg2))
-        print(f"  Gemini GEMINI.md 更新: {msg2}")
+            ok2, msg2 = update_gemini_md(_gemini_dir / "GEMINI.md", home / "MEMORY_PROTOCOL.md")
+            results.append(("Gemini GEMINI.md 更新", ok2, msg2))
+            print(f"  Gemini GEMINI.md 更新: {msg2}")
+        else:
+            print("  Antigravity/Gemini: 未検出(インストールされていれば後で `engram setup` を再実行)")
     else:
-        print("  Antigravity/Gemini: 未検出(インストールされていれば後で `engram setup` を再実行)")
+        if "gemini" in detected_agents:
+            print(f"  {_AGENT_DISPLAY['gemini']}: 選択外(スキップ)")
+        else:
+            print("  Antigravity/Gemini: 未検出(インストールされていれば後で `engram setup` を再実行)")
 
     print()
 

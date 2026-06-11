@@ -246,6 +246,12 @@ def main() -> None:
         default=None,
         help="記憶フォルダのパス(省略時は ~/.engram/memories)",
     )
+    p_setup.add_argument(
+        "--agents",
+        default=None,
+        metavar="AGENTS",
+        help="登録するエージェントをカンマ区切りで指定(例: claude,codex)。省略時は検出された全部",
+    )
 
     # --- doctor ---
     subparsers.add_parser("doctor", help="環境診断を表示する")
@@ -254,14 +260,22 @@ def main() -> None:
 
     # setup / doctor はエンジン構築なしで動く
     if args.command == "setup":
-        from .setup import setup_main
+        from .setup import parse_agents, setup_main
         memories_dir = None
         if args.memories_dir:
             from pathlib import Path
             memories_dir = Path(args.memories_dir)
+        selected_agents = None
+        if args.agents is not None:
+            try:
+                selected_agents = parse_agents(args.agents)
+            except ValueError as e:
+                print(f"エラー: {e}", file=sys.stderr)
+                sys.exit(1)
         setup_main(
             memories_dir=memories_dir,
             non_interactive=args.non_interactive,
+            agents=selected_agents,
         )
         return
 
