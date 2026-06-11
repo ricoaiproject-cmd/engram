@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -120,14 +121,40 @@ def is_claude_mcp_registered() -> bool:
         return False
 
 
+def _claude_registered_path(cmd: str) -> str | None:
+    """claude mcp list の出力から engram の登録先パスを取り出す(未登録なら None)。"""
+    try:
+        result = subprocess.run(
+            [cmd, "mcp", "list"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+        )
+        output = result.stdout + result.stderr
+        m = re.search(r"engram:\s*(\S+)", output)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
 def register_claude_mcp(engram_mcp_path: Path) -> tuple[bool, str]:
     """Claude Code に engram MCP を登録する。成功すれば (True, メッセージ)。"""
     cmd = _claude_cmd()
     if cmd is None:
         return False, "claude コマンドが見つかりません(Claude Code 未インストール)"
 
-    if is_claude_mcp_registered():
-        return True, "既登録(スキップ)"
+    registered = _claude_registered_path(cmd)
+    if registered is not None:
+        if registered == str(engram_mcp_path):
+            return True, "既登録(スキップ)"
+        # パスが古い(再インストールで場所が変わった等)場合は登録し直す
+        try:
+            subprocess.run(
+                [cmd, "mcp", "remove", "engram"],
+                capture_output=True, text=True, timeout=60,
+                encoding="utf-8", errors="replace",
+            )
+        except Exception:
+            pass
 
     try:
         result = subprocess.run(
@@ -172,13 +199,25 @@ def register_codex(
 ) -> tuple[bool, str]:
     """~/.codex/config.toml に engram MCP ブロックを追記する。冪等。"""
     try:
+        import re
+
         codex_config_path.parent.mkdir(parents=True, exist_ok=True)
         existing = ""
         if codex_config_path.is_file():
             existing = codex_config_path.read_text(encoding="utf-8")
-        if "[mcp_servers.engram]" in existing:
-            return True, "既追記済み(スキップ)"
         mcp_path_str = str(engram_mcp_path).replace("\\", "/")
+        if "[mcp_servers.engram]" in existing:
+            # 登録済みでもパスが古い(再インストールで場所が変わった等)場合は
+            # 更新する。壊れたパスのまま残すと接続不能になる(実機で発生)
+            pattern = r"(\[mcp_servers\.engram\]\s*\r?\ncommand = ')([^']*)(')"
+            m = re.search(pattern, existing)
+            if m and m.group(2) == mcp_path_str:
+                return True, "既追記済み(スキップ)"
+            if m:
+                updated = re.sub(pattern, rf"\g<1>{mcp_path_str}\g<3>", existing)
+                codex_config_path.write_text(updated, encoding="utf-8")
+                return True, "パスを更新"
+            return True, "既追記済み(手動編集を検出したため変更せず)"
         addition = (
             f"\n[mcp_servers.engram]\n"
             f"command = '{mcp_path_str}'\n"
@@ -246,10 +285,19 @@ def register_gemini_mcp(
         if "mcpServers" not in data:
             data["mcpServers"] = {}
 
-        if "engram" in data["mcpServers"]:
-            return True, "既登録(スキップ)"
-
         mcp_path_str = str(engram_mcp_path).replace("\\", "/")
+        if "engram" in data["mcpServers"]:
+            current = data["mcpServers"]["engram"].get("command", "")
+            if current == mcp_path_str:
+                return True, "既登録(スキップ)"
+            # パスが古い場合は更新(壊れたパスのまま残さない)
+            data["mcpServers"]["engram"]["command"] = mcp_path_str
+            mcp_config_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return True, "パスを更新"
+
         data["mcpServers"]["engram"] = {"command": mcp_path_str}
         mcp_config_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),

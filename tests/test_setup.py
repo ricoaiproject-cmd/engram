@@ -233,14 +233,16 @@ class TestGeminiMcpJson:
         assert "engram" in data["mcpServers"]
 
     def test_idempotent_if_already_registered(self, tmp_path):
+        """同じパスで登録済みならスキップ。"""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
         mcp_json = tmp_path / ".gemini" / "config" / "mcp_config.json"
         mcp_json.parent.mkdir(parents=True, exist_ok=True)
         mcp_json.write_text(
-            json.dumps({"mcpServers": {"engram": {"command": "/some/path"}}}),
+            json.dumps({"mcpServers": {"engram": {"command": same_path}}}),
             encoding="utf-8",
         )
-        fake_mcp = tmp_path / "engram-mcp.exe"
-        fake_mcp.write_bytes(b"")
 
         ok, msg = register_gemini_mcp(mcp_json, fake_mcp)
         assert ok
@@ -248,6 +250,27 @@ class TestGeminiMcpJson:
         # 重複追加されていないこと
         data = json.loads(mcp_json.read_text(encoding="utf-8"))
         assert len(data["mcpServers"]) == 1
+
+    def test_stale_path_is_updated(self, tmp_path):
+        """登録済みでもパスが古ければ更新する(壊れたパスを残さない)。"""
+        mcp_json = tmp_path / ".gemini" / "config" / "mcp_config.json"
+        mcp_json.parent.mkdir(parents=True, exist_ok=True)
+        mcp_json.write_text(
+            json.dumps({"mcpServers": {
+                "engram": {"command": "//old-server/broken/engram-mcp.exe"},
+                "other": {"command": "/path/to/other"},
+            }}),
+            encoding="utf-8",
+        )
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+
+        ok, msg = register_gemini_mcp(mcp_json, fake_mcp)
+        assert ok
+        assert "更新" in msg
+        data = json.loads(mcp_json.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["engram"]["command"] == str(fake_mcp).replace("\\", "/")
+        assert "other" in data["mcpServers"]  # 他のサーバーは無傷
 
     def test_existing_servers_preserved(self, tmp_path):
         mcp_json = tmp_path / ".gemini" / "config" / "mcp_config.json"
@@ -297,17 +320,42 @@ class TestCodexConfig:
         assert "[mcp_servers.engram]" in content
 
     def test_idempotent_if_already_registered(self, tmp_path):
-        codex_cfg = tmp_path / ".codex" / "config.toml"
-        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
-        codex_cfg.write_text("[mcp_servers.engram]\ncommand = '/some/path'\n", encoding="utf-8")
+        """同じパスで登録済みならスキップ。"""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n", encoding="utf-8"
+        )
 
         ok, msg = register_codex(codex_cfg, fake_mcp)
         assert ok
         assert "スキップ" in msg
         content = codex_cfg.read_text(encoding="utf-8")
         # 重複追加されていないこと
+        assert content.count("[mcp_servers.engram]") == 1
+
+    def test_stale_path_is_updated(self, tmp_path):
+        """登録済みでもパスが古ければ更新する(壊れたパスを残さない)。
+        職場PC実機で発生: 1回目の失敗時のネットワークパスが残り Codex が接続不能になった。"""
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            "[other]\nkey = 'v'\n\n[mcp_servers.engram]\ncommand = '//old-server/broken/engram-mcp.exe'\n",
+            encoding="utf-8",
+        )
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "更新" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        assert str(fake_mcp).replace("\\", "/") in content
+        assert "//old-server/broken" not in content
+        assert "[other]" in content  # 他の設定は無傷
         assert content.count("[mcp_servers.engram]") == 1
 
     def test_existing_content_preserved(self, tmp_path):
