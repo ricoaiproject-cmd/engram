@@ -20,7 +20,7 @@ Write-Host ""
 # ----------------------------------------------------------------
 # Step 1: uv の確認とインストール
 # ----------------------------------------------------------------
-Write-Host "[1/3] uv のインストール確認..."
+Write-Host "[1/4] uv のインストール確認..."
 
 $uvPath = $null
 try {
@@ -63,9 +63,56 @@ if ($uvPath) {
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 2: engram のインストール
+# Step 2: git の確認とインストール(git+ ソースの取得に必要)
 # ----------------------------------------------------------------
-Write-Host "[2/3] engram をインストールします..."
+Write-Host "[2/4] git のインストール確認..."
+
+if ($Source -like "git+*") {
+    $gitPath = $null
+    try {
+        $gitPath = (Get-Command git -ErrorAction SilentlyContinue).Source
+    } catch {}
+
+    if ($gitPath) {
+        Write-Host "  git は既にインストール済みです: $gitPath"
+    } else {
+        Write-Host "  git が見つかりません。インストールします..."
+        winget install --id Git.Git -e --silent --accept-source-agreements --accept-package-agreements
+        if (-not $?) {
+            Write-Host ""
+            Write-Host "[エラー] git のインストールに失敗しました。"
+            Write-Host "  手動でインストールしてください: https://git-scm.com/downloads/win"
+            exit 1
+        }
+
+        # 現セッションの PATH に git を追加
+        $gitBin = "C:\Program Files\Git\cmd"
+        if ((Test-Path $gitBin) -and ($env:PATH -notlike "*$gitBin*")) {
+            $env:PATH = "$gitBin;$env:PATH"
+        }
+
+        try {
+            $gitPath = (Get-Command git -ErrorAction SilentlyContinue).Source
+        } catch {}
+
+        if (-not $gitPath) {
+            Write-Host ""
+            Write-Host "[エラー] git のインストール後もコマンドが見つかりません。"
+            Write-Host "  ターミナルを再起動してから再度お試しください。"
+            exit 1
+        }
+        Write-Host "  git のインストール完了: $gitPath"
+    }
+} else {
+    Write-Host "  ローカルソースのため git は不要です(スキップ)"
+}
+
+Write-Host ""
+
+# ----------------------------------------------------------------
+# Step 3: engram のインストール
+# ----------------------------------------------------------------
+Write-Host "[3/4] engram をインストールします..."
 Write-Host "  ソース: $Source"
 Write-Host "  (初回は Python 3.12 のダウンロードが発生する場合があります)"
 Write-Host ""
@@ -91,9 +138,9 @@ Write-Host "  engram のインストール完了"
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 3: セットアップウィザードの実行
+# Step 4: セットアップウィザードの実行
 # ----------------------------------------------------------------
-Write-Host "[3/3] セットアップウィザードを実行します..."
+Write-Host "[4/4] セットアップウィザードを実行します..."
 Write-Host ""
 
 $engramExe = Join-Path $env:USERPROFILE ".local\bin\engram.exe"
