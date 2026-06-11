@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+.venv/
+venv/
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ローカル実験の残骸
+*.bak
+*.tmp
