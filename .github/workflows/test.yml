@@ -19,6 +19,10 @@ jobs:
 
       - name: Install dependencies
         shell: bash
+        # only-managed: the runners' preinstalled Pythons (python.org builds on
+        # macOS) lack SQLite loadable-extension support, which sqlite-vec needs
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
         run: |
           uv venv --python 3.12
           # Linux: use CPU-only torch wheels (the default CUDA build is huge)

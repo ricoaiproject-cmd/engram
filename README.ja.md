@@ -47,16 +47,18 @@ macOS / Linux:
 # 1. uv をインストール(既にある場合はスキップ)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. engram をインストール
-uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
+# 2. engram をインストール(uv 管理の Python を強制 — 下の注記参照)
+UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
 
 # 3. セットアップウィザードを実行
 engram setup
 ```
 
-> なぜ uv? 手軽さに加えて、engram は SQLite の拡張ロード(sqlite-vec が使用)に
-> 対応した Python を必要とします。uv が管理する Python はこれに対応しています
-> (macOS 標準の Python は非対応)。
+> なぜ uv 管理の Python? engram は SQLite の拡張ロード(sqlite-vec が使用)に
+> 対応した Python を必要とします。macOS 標準や python.org の Python は非対応で、
+> しかも存在すると uv はそちらを優先してしまうため、
+> `UV_PYTHON_PREFERENCE=only-managed` で uv 管理の Python を強制します
+> (install.sh は自動で設定します)。`engram doctor` に確認項目があります。
 
 セットアップウィザードが以下を自動で行います:
 - 設定ファイル(`~/.engram/config.toml`)の作成

@@ -48,6 +48,17 @@ class IndexDB:
         self._conn.row_factory = sqlite3.Row
 
         # Load sqlite-vec extension
+        # macOS 標準や python.org の Python は SQLite 拡張ロード非対応のまま
+        # ビルドされており、AttributeError で落ちる。原因と対処が分かる
+        # エラーにする(uv 管理の Python は対応済み)
+        if not hasattr(self._conn, "enable_load_extension"):
+            self._conn.close()
+            raise RuntimeError(
+                "この Python の SQLite は拡張ロード非対応のため、ベクトル検索"
+                "(sqlite-vec)を初期化できません。uv 管理の Python で入れ直して"
+                "ください: UV_PYTHON_PREFERENCE=only-managed uv tool install "
+                "--python 3.12 --force git+https://github.com/ricoaiproject-cmd/engram.git"
+            )
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)
         self._conn.enable_load_extension(False)

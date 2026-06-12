@@ -843,6 +843,14 @@ def doctor_main(
     major, minor, *_ = py_ver.split(".")
     py_ok = int(major) >= 3 and int(minor) >= 12
     row("Python バージョン", "[OK]" if py_ok else "[NG]", py_ver)
+
+    # SQLite 拡張ロード対応(sqlite-vec に必須。macOS 標準 Python は非対応)
+    import sqlite3 as _sqlite3
+    _conn = _sqlite3.connect(":memory:")
+    ext_ok = hasattr(_conn, "enable_load_extension")
+    _conn.close()
+    row("SQLite 拡張ロード対応", "[OK]" if ext_ok else "[NG]",
+        "" if ext_ok else "uv 管理の Python で入れ直してください(README 参照)")
     print()
 
     # config.toml

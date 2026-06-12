@@ -60,14 +60,16 @@ echo ""
 # ----------------------------------------------------------------
 # Step 3: install engram
 # ----------------------------------------------------------------
-# Note: uv-managed Python is required — its SQLite build supports loadable
-# extensions (needed by sqlite-vec). The stock macOS system Python does not.
+# Note: uv-MANAGED Python is required — its SQLite build supports loadable
+# extensions (needed by sqlite-vec). System / python.org builds on macOS do
+# not, and uv would otherwise prefer them when present, so force the managed
+# distribution explicitly.
 echo "[3/4] Installing engram..."
 echo "  Source: $SOURCE"
 echo "  (The first run may download Python 3.12.)"
 echo ""
 
-uv tool install --python 3.12 --force "$SOURCE"
+UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 --force "$SOURCE"
 
 export PATH="$HOME/.local/bin:$PATH"
 echo ""

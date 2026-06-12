@@ -199,12 +199,16 @@ def test_register_claude_hooks_idempotent(tmp_path):
 
 def test_register_claude_hooks_updates_stale_path(tmp_path):
     settings_path = tmp_path / "settings.json"
-    register_claude_hooks(settings_path, tmp_path / "old" / "engram.exe")
-    ok, msg = register_claude_hooks(settings_path, tmp_path / "new" / "engram.exe")
+    old_exe = tmp_path / "old" / "engram.exe"
+    new_exe = tmp_path / "new" / "engram.exe"
+    register_claude_hooks(settings_path, old_exe)
+    ok, msg = register_claude_hooks(settings_path, new_exe)
     assert ok
     data = json.loads(settings_path.read_text(encoding="utf-8"))
     cmd = data["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
-    assert "new" in cmd and "old" not in cmd
+    # フルパスで比較する("old" の部分文字列検査は macOS の一時パス
+    # /var/folders/... に誤反応した実例がある)
+    assert str(new_exe) in cmd and str(old_exe) not in cmd
     # エントリが増殖していない
     assert len(data["hooks"]["SessionEnd"]) == 1
 

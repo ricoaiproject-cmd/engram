@@ -54,16 +54,18 @@ macOS / Linux:
 # 1. Install uv (skip if you already have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Install engram
-uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
+# 2. Install engram (force a uv-managed Python — see note below)
+UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
 
 # 3. Run the setup wizard
 engram setup
 ```
 
-> Why uv? Besides convenience, engram needs a Python whose SQLite supports
+> Why a uv-managed Python? engram needs a Python whose SQLite supports
 > loadable extensions (for sqlite-vec). uv-managed Python provides this;
-> the stock macOS system Python does not.
+> system / python.org builds on macOS do not, and uv would otherwise prefer
+> them when present — hence `UV_PYTHON_PREFERENCE=only-managed` (install.sh
+> sets it for you). `engram doctor` has a check row for this.
 
 The setup wizard automatically:
 - creates the config file (`~/.engram/config.toml`)
