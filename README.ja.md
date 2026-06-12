@@ -9,15 +9,26 @@ Claude Code / Codex / Antigravity(Gemini CLI)が共有する永続記憶。
 
 ## クイックスタート(受け取った方へ)
 
-### 方法1: 一発インストール(PowerShell)
+### 方法1: 一発インストール
+
+Windows(PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
 ```
 
+macOS / Linux:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
+```
+
 これ1行で uv のインストール・engram のインストール・セットアップウィザードまで実行されます。
+(macOS は git が必要です。無い場合は先に `xcode-select --install` を実行してください)
 
 ### 方法2: 3コマンドで手動インストール
+
+Windows(PowerShell):
 
 ```powershell
 # 1. uv をインストール(既にある場合はスキップ)
@@ -29,6 +40,23 @@ uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.gi
 # 3. セットアップウィザードを実行
 engram setup
 ```
+
+macOS / Linux:
+
+```bash
+# 1. uv をインストール(既にある場合はスキップ)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. engram をインストール
+uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
+
+# 3. セットアップウィザードを実行
+engram setup
+```
+
+> なぜ uv? 手軽さに加えて、engram は SQLite の拡張ロード(sqlite-vec が使用)に
+> 対応した Python を必要とします。uv が管理する Python はこれに対応しています
+> (macOS 標準の Python は非対応)。
 
 セットアップウィザードが以下を自動で行います:
 - 設定ファイル(`~/.engram/config.toml`)の作成
@@ -301,4 +329,12 @@ uv tool uninstall engram
 # 6. データを削除する場合(記憶・設定・モデルキャッシュ)
 Remove-Item -Recurse -Force "$env:USERPROFILE\.engram"
 Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--cl-nagoya--ruri*"
+```
+
+macOS / Linux の手順5-6:
+
+```bash
+uv tool uninstall engram
+rm -rf ~/.engram
+rm -rf ~/.cache/huggingface/hub/models--cl-nagoya--ruri*
 ```

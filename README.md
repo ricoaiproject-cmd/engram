@@ -15,15 +15,27 @@ but never disappear — the same dynamics as human memory.
 
 ## Quick start
 
-### Option 1: one-line install (PowerShell)
+### Option 1: one-line install
+
+Windows (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
 ```
 
+macOS / Linux:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
+```
+
 This single line installs uv, installs engram, and runs the setup wizard.
+(macOS: git is required — run `xcode-select --install` first if you don't
+have it.)
 
 ### Option 2: manual install in three commands
+
+Windows (PowerShell):
 
 ```powershell
 # 1. Install uv (skip if you already have it)
@@ -35,6 +47,23 @@ uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.gi
 # 3. Run the setup wizard
 engram setup
 ```
+
+macOS / Linux:
+
+```bash
+# 1. Install uv (skip if you already have it)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Install engram
+uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
+
+# 3. Run the setup wizard
+engram setup
+```
+
+> Why uv? Besides convenience, engram needs a Python whose SQLite supports
+> loadable extensions (for sqlite-vec). uv-managed Python provides this;
+> the stock macOS system Python does not.
 
 The setup wizard automatically:
 - creates the config file (`~/.engram/config.toml`)
@@ -326,4 +355,12 @@ uv tool uninstall engram
 # 6. To delete the data as well (memories, config, model cache)
 Remove-Item -Recurse -Force "$env:USERPROFILE\.engram"
 Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--cl-nagoya--ruri*"
+```
+
+On macOS / Linux, steps 5–6 are:
+
+```bash
+uv tool uninstall engram
+rm -rf ~/.engram
+rm -rf ~/.cache/huggingface/hub/models--cl-nagoya--ruri*
 ```
