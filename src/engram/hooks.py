@@ -21,6 +21,21 @@ from .config import Settings, get_settings, resolve_room
 
 _ENCODED_SESSIONS_KEEP = 500
 
+# 人間の発言ではない、エージェント/ハーネスが差し込むテキストの先頭部。
+# これらに自発的想起を反応させると、システム通知のたびに無関係な記憶が
+# 浮上してノイズになる(実ログで確認)。スラッシュコマンドも対象外。
+_NON_HUMAN_PREFIXES = (
+    "/",                       # スラッシュコマンド
+    "<",                       # <task-notification> / <command-name> / <!-- ... 等
+    "Caveat:",                 # ローカルコマンド実行時の注意書き
+    "[Request interrupted",    # 中断通知
+)
+
+
+def _is_non_human(text: str) -> bool:
+    """発言が人間由来でない(システム/ハーネスのテキスト)かを判定する。"""
+    return any(text.startswith(p) for p in _NON_HUMAN_PREFIXES)
+
 
 def _log(settings: Settings, message: str) -> None:
     try:
@@ -176,7 +191,7 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
         stripped = prompt.strip()
         if len(stripped) < settings.surface_min_prompt_chars:
             return 0
-        if stripped.startswith("/"):  # スラッシュコマンドは対象外
+        if _is_non_human(stripped):  # システム/ハーネスのテキストは対象外
             return 0
 
         room = resolve_room(cwd, settings.room_paths)

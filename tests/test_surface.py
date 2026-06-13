@@ -78,6 +78,20 @@ def test_run_surface_finds_related_memory(tmp_path):
     assert top["id"] in result["surfaced"]
 
 
+def test_run_surface_excludes_episodes(tmp_path):
+    # episode は自発的想起の対象外(オウム返し・ノイズ防止)
+    settings = _make_settings(tmp_path, surface_threshold=0.3)
+    engine = _make_engine(settings)
+    engine.remember("予算要求の書式は財務課の様式7を使うこと", "knowledge", 7)
+    engine.remember("予算要求の書式について相談したセッションの記録", "episode", 5)
+    engine.db.close()
+
+    result = run_surface("予算要求の書式", settings=settings, session_id="s1")
+    types = {c["type"] for c in result["candidates"]}
+    assert "episode" not in types
+    assert result["candidates"]  # knowledge は出る
+
+
 def test_run_surface_no_repeat_within_session(tmp_path):
     settings = _make_settings(tmp_path, surface_threshold=0.3)
     engine = _make_engine(settings)

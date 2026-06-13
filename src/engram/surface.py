@@ -106,11 +106,18 @@ def _fetch_candidates(db_path: Path, rooms: list[str] | None) -> list[dict]:
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA busy_timeout=2000")
+        # episode は除外する。自発的想起は軽量な fast 相当であり、
+        # (1) episode は生の体験ログでノイズになりやすく、deep recall で
+        #     連想的に辿るのが本来の使い道(recall の fast も episode を除外)
+        # (2) 自動符号化(①)はユーザー発言を要約 episode に保存するため、
+        #     除外しないと「似た発言→自分の言葉を含む episode が完全一致で
+        #     浮上」という相互作用でオウム返し状態になる(実ログで確認)
+        # 知見・好み・プロジェクトに昇華された記憶だけを浮上させる
         sql = (
             "SELECT m.id, m.type, m.importance, m.room, m.created_at, "
             "       f.content AS content "
             "FROM memories m JOIN fts_memories f ON f.memory_id = m.id "
-            "WHERE m.tier = 'hot'"
+            "WHERE m.tier = 'hot' AND m.type != 'episode'"
         )
         params: list = []
         if rooms:
