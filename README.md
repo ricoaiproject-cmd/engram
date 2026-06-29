@@ -255,7 +255,7 @@ The SQLite index always stays local, so there is no sync-conflict risk.
 
 | Tool | When to use |
 |---|---|
-| `recall(query, mode, limit, type, room)` | At task start. fast = normal / deep = explores associative links, cold tier, and episodes |
+| `recall(query, mode, limit, type, room)` | At task start. fast = normal / deep = explores associative links, cold tier, and episodes / exhaustive = relevance-only full scan, ignoring activation, to dig up sunk memories |
 | `remember(content, type, importance, tags, related_ids, room)` | When you learn an insight, preference, context, or event. importance 1–10 scores how critical the context is |
 | `reinforce(ids, strength)` | At task end, report which memories actually helped (the nutrient for consolidation) |
 | `correct(id, corrected_content, reason)` | When a memory was wrong. Use this, not forget (engraves the mistake itself deeply) |

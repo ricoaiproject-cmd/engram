@@ -126,7 +126,7 @@ class MemoryEngine:
         self,
         query: str,
         *,
-        mode: str = "fast",        # "fast" | "deep"
+        mode: str = "fast",        # "fast" | "deep" | "exhaustive"
         limit: int = 5,
         type: str | None = None,
         room: str | None = None,   # None/"*"=全部屋。指定時は {room, common} に限定
@@ -152,6 +152,14 @@ class MemoryEngine:
           記憶は via="associative"。relevance はクエリとの実コサインを別途計算。
         - superseded の記憶は note に「→ [後継id] により訂正済み」を入れ、
           後継(superseded_by リンク先)も結果に含める。
+
+        exhaustive(網羅検索)の手順:
+        - 候補数を絞らず全 tier/type の全記憶について、クエリとのコサイン類似
+          (relevance)のみで順位付けする。活性度は同点時のタイブレークのみ。
+        - 長く使われず沈んだ(活性度の低い)記憶でも意味的に近ければ必ず浮上する。
+        - settings.exhaustive_min_relevance 未満は返さない。deep の最高スコアが
+          settings.exhaustive_score_threshold 未満のときは自動で exhaustive へ
+          エスカレーションする(その場合 mode に "exhaustive" が返る)。
         返り値: {"hits": [RecallHit を dict 化], "mode", "auto_deepened": bool}。
         """
         ts = now if now is not None else time.time()
@@ -162,18 +170,36 @@ class MemoryEngine:
         if room is not None and room != "*":
             rooms = sorted({room, "common"})
 
-        # fast モードでの検索
-        hits, best_score = self._fast_recall(query, limit=limit, type=type,
-                                             rooms=rooms, now=ts)
+        if mode == "exhaustive":
+            # 明示的な網羅検索: 活性度を無視し関連度のみで全件から拾う
+            hits = self._exhaustive_recall(query, limit=limit, type=type,
+                                           rooms=rooms, now=ts)
+        else:
+            # fast モードでの検索
+            hits, best_score = self._fast_recall(query, limit=limit, type=type,
+                                                 rooms=rooms, now=ts)
 
-        # 最高スコアが閾値未満なら deep を自動発動
-        if mode == "fast" and best_score < self.settings.deep_score_threshold:
-            mode = "deep"
-            auto_deepened = True
+            # 最高スコアが閾値未満なら deep を自動発動
+            if mode == "fast" and best_score < self.settings.deep_score_threshold:
+                mode = "deep"
+                auto_deepened = True
 
-        if mode == "deep":
-            hits = self._deep_recall(query, fast_hits=hits, limit=limit, type=type,
-                                     rooms=rooms, now=ts)
+            if mode == "deep":
+                hits = self._deep_recall(query, fast_hits=hits, limit=limit,
+                                         type=type, rooms=rooms, now=ts)
+                # deep でも最高スコアが弱い=沈んだ記憶や candidate_k の枠外で
+                # 掘りきれていない可能性。関連度のみの網羅検索を試し、より関連度の
+                # 高い結果が得られたときだけ採用する(空振りで結果を劣化させない)。
+                deep_best = hits[0].score if hits else 0.0
+                if deep_best < self.settings.exhaustive_score_threshold:
+                    ex_hits = self._exhaustive_recall(
+                        query, limit=limit, type=type, rooms=rooms, now=ts)
+                    deep_best_rel = max((h.relevance for h in hits), default=0.0)
+                    ex_best_rel = max((h.relevance for h in ex_hits), default=0.0)
+                    if ex_hits and ex_best_rel > deep_best_rel:
+                        mode = "exhaustive"
+                        auto_deepened = True
+                        hits = ex_hits
 
         # recall_hit イベントを記録
         if record_hits:
@@ -455,6 +481,101 @@ class MemoryEngine:
                 room=mem.get("room", "common"),
             )
             hits.append(hit)
+
+        return hits
+
+    def _exhaustive_recall(
+        self,
+        query: str,
+        *,
+        limit: int,
+        type: str | None,
+        rooms: list[str] | None = None,
+        now: float,
+    ) -> list[RecallHit]:
+        """網羅検索: 活性度を無視し関連度のみで全 tier/type を総当たりする。
+
+        fast/deep は final_score に活性度が効くため、長く使われず沈んだ記憶は
+        関連が高くても limit の外へ押し出される(「忘れない記憶」なのに想起
+        できない)。ここでは候補数を絞らず全記憶のクエリとのコサイン類似だけで
+        順位付けするので、沈んだ記憶も意味的に近ければ必ず浮上する。
+        部屋フィルタは維持し、settings.exhaustive_min_relevance 未満は返さない。
+        """
+        s = self.settings
+
+        # 全 tier・全 type を対象(部屋フィルタは維持する)
+        search_tiers = ["hot", "cold", "superseded"]
+        search_types = [type] if type is not None else None
+
+        mem_rows = self.db.all_memories(
+            tiers=search_tiers, types=search_types, rooms=rooms
+        )
+        if not mem_rows:
+            return []
+
+        mem_by_id = {m["id"]: m for m in mem_rows}
+        ids = list(mem_by_id.keys())
+
+        qvec = self.embedder.embed_query(query)
+        emb_map = self.db.get_embeddings(ids)
+        events_map = self.db.get_events(ids)
+
+        # superseded 記憶の後継マップ(訂正済み注記用)
+        successor_map: dict[str, str] = {}
+        for src, dst, kind, _ in self.db.get_links(ids, kinds=["superseded_by"]):
+            if kind == "superseded_by":
+                successor_map[src] = dst
+
+        scored: list[tuple[float, float, str]] = []  # (relevance, activation, id)
+        for id_ in ids:
+            emb = emb_map.get(id_)
+            if emb is None:
+                continue
+            rel = max(0.0, float(np.dot(qvec, emb)))
+            if rel < s.exhaustive_min_relevance:
+                continue
+            imp = mem_by_id[id_]["importance"]
+            d = dynamics.decay_rate(imp)
+            act = dynamics.activation_norm(events_map.get(id_, []), now, d,
+                                           min_elapsed=s.min_elapsed_seconds)
+            scored.append((rel, act, id_))
+
+        # 関連度を主、活性度は同点時のタイブレークのみ(沈んでいても拾う)
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        top = scored[:limit]
+
+        hits: list[RecallHit] = []
+        for rel, act, id_ in top:
+            mem = mem_by_id[id_]
+            imp = mem["importance"]
+            try:
+                rec = self.store.read(Path(mem["path"]))
+                content = rec.content
+                tags = rec.tags
+                tier = rec.tier
+            except Exception:
+                content = ""
+                tags = []
+                tier = mem.get("tier", "hot")
+
+            note = ""
+            if tier == "superseded" and id_ in successor_map:
+                note = f"→ [{successor_map[id_]}] により訂正済み"
+
+            hits.append(RecallHit(
+                id=id_,
+                content=content,
+                type=mem["type"],
+                tags=tags,
+                tier=tier,
+                score=rel,            # 網羅検索の順位基準は関連度そのもの
+                relevance=rel,
+                activation=act,
+                importance=imp / 10.0,
+                via="exhaustive",
+                note=note,
+                room=mem.get("room", "common"),
+            ))
 
         return hits
 

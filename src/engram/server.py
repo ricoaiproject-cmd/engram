@@ -17,6 +17,8 @@ mcp 公式 SDK の FastMCP(stdio)で engine の操作をツールとして公開
 
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -28,6 +30,7 @@ mcp = FastMCP("engram")
 
 # モジュールレベル遅延シングルトン(初回ツール呼び出しで構築)
 _engine: MemoryEngine | None = None
+_engine_lock = threading.Lock()
 
 # サーバーの既定の部屋。プロセス起動時の作業ディレクトリ(=エージェントを
 # 起動したプロジェクト)から config の room_paths で決まる
@@ -35,10 +38,13 @@ _room: str | None = None
 
 
 def _get_engine() -> MemoryEngine:
-    """エンジンを遅延構築して返す。"""
+    """エンジンを遅延構築して返す(スレッド安全)。"""
     global _engine
-    if _engine is None:
-        _engine = build_engine()
+    if _engine is not None:
+        return _engine
+    with _engine_lock:
+        if _engine is None:
+            _engine = build_engine()
     return _engine
 
 
@@ -98,6 +104,8 @@ def recall(
     タスク開始時に必ず呼ぶ。関連する過去の知識・好み・プロジェクト状況を想起できる。
     mode="fast" は tier=hot のみ高速検索。スコアが低いと自動で deep に切り替わる。
     mode="deep" は cold/superseded/episode も含め連想リンクを辿って広く探す。
+    mode="exhaustive" は活性度を無視し関連度のみで全記憶を総当たりする。
+    「確かに記録したはずなのに fast/deep で出ない」沈んだ記憶を掘り起こす最終手段。
     room は通常指定不要(現在の部屋+共通だけを検索する)。room="*" で全部屋を
     横断検索できるが、仕事/個人の分離を壊さないよう必要時のみ使うこと。
     """
@@ -220,20 +228,40 @@ def stats() -> dict:
     return engine.stats()
 
 
-def main() -> None:
-    """stdio MCP サーバーを起動する。"""
+def _preload() -> None:
+    """埋め込みモデルを先読みする(失敗しても起動は続行)。"""
     import sys
 
-    # torch / sentence_transformers の import はワーカースレッド内だと異常に
-    # 遅い(実測: メインスレッド 7秒 / スレッド内 60秒以上)。FastMCP は同期
-    # ツールをワーカースレッドで実行するため、recall 初回にロードすると
-    # ツール呼び出しがハングしセッションごと固まって見える。
-    # 必ずメインスレッドで起動時に先読みしておく(接続タイムアウト30秒以内)。
     try:
         engine = _get_engine()
         engine.embedder.embed_query("ウォームアップ")
         print("engram: engine preloaded", file=sys.stderr)
     except Exception as e:  # 失敗しても起動は続け、初回ツール呼び出しで再試行
         print(f"engram: preload failed, will retry lazily: {e}", file=sys.stderr)
+
+
+def main() -> None:
+    """stdio MCP サーバーを起動する。"""
+    # torch / sentence_transformers の import は非常に重い(実測: import だけで
+    # cold 50秒超)。これを mcp.run() の前にメインスレッドで実行すると initialize
+    # ハンドシェイクがその間ブロックされ、起動タイムアウトの短い MCP クライアント
+    # (例: Antigravity IDE)は接続を "context canceled" で打ち切ってしまう。
+    #
+    # ENGRAM_PRELOAD で先読み方式を選ぶ:
+    #   blocking (既定) — 従来どおり起動時にメインスレッドで先読み。初回 recall は
+    #                     速いが、ハンドシェイクは import 完了まで待つ。
+    #   background      — 先読みをデーモンスレッドに回し、mcp.run() を即実行する。
+    #                     ハンドシェイクは即応答し、モデルは裏で準備される。初回
+    #                     recall はモデル準備完了までロック待ちになる。
+    #   off             — 先読みしない。初回ツール呼び出し時に遅延ロードする。
+    # FastMCP は同期ツールをワーカースレッドで実行するため、_get_engine と
+    # RuriEmbedder._load はロックで多重ロードを防いでいる。
+    mode = os.environ.get("ENGRAM_PRELOAD", "blocking").strip().lower()
+    if mode == "background":
+        threading.Thread(
+            target=_preload, name="engram-preload", daemon=True
+        ).start()
+    elif mode != "off":
+        _preload()
 
     mcp.run()

@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
+import numpy as np
 import pytest
 
 from engram.config import Settings
@@ -725,3 +726,119 @@ class TestCorrectionTag:
         # store.create に渡された importance が 7 以上になること
         create_kwargs = store.create.call_args[1]
         assert create_kwargs["importance"] >= 7
+
+
+# ---------------------------------------------------------------------------
+# exhaustive recall(沈んだ記憶の掘り起こし)テスト
+# ---------------------------------------------------------------------------
+
+
+class _FixedQueryEmbedder:
+    """embed_query が常に固定ベクトルを返すスタブ(relevance を厳密に制御する)。"""
+
+    def __init__(self, qvec):
+        self._q = np.asarray(qvec, dtype=np.float32)
+        self.dim = len(self._q)
+
+    def embed_query(self, text):
+        return self._q
+
+    def embed_docs(self, texts):
+        return [self._q for _ in texts]
+
+
+class TestExhaustiveRecall:
+    def test_exhaustive_ranks_by_relevance_ignoring_activation(self, tmp_path):
+        """mode=exhaustive は活性度を無視し関連度順。沈んだ高関連記憶が浮上し、
+        関連度が floor 未満の記憶は除外されること。"""
+        embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
+        engine, db, store = _build_engine(tmp_path, embedder=embedder)
+
+        # R: 沈んだ(古い1イベントのみ)が関連度最大、G: 新しく高活性だが関連度中、
+        # L: 関連度ゼロ(floor 未満で除外される)
+        r = _fake_db_mem(id="R", type="knowledge", importance=1,
+                         created_at=NOW - 1000 * DAY, path="/tmp/R.md")
+        g = _fake_db_mem(id="G", type="preference", importance=9,
+                         created_at=NOW - DAY, path="/tmp/G.md")
+        ll = _fake_db_mem(id="L", type="knowledge", importance=5,
+                          created_at=NOW - DAY, path="/tmp/L.md")
+        db.all_memories.return_value = [r, g, ll]
+        db.get_embeddings.return_value = {
+            "R": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),   # cos 1.0
+            "G": np.asarray([0.6, 0.8, 0.0, 0.0], dtype=np.float32),   # cos 0.6
+            "L": np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32),   # cos 0.0
+        }
+        db.get_events.return_value = {
+            "R": [(NOW - 1000 * DAY, 1.0)],                 # 沈んでいる
+            "G": [(NOW - DAY, 3.0), (NOW - 2 * DAY, 2.0)],  # 高活性
+            "L": [(NOW - DAY, 1.0)],
+        }
+        store.read.side_effect = lambda p: _fake_record(
+            id=Path(p).stem, content=f"{Path(p).stem} の本文"
+        )
+
+        result = engine.recall("ターゲット", mode="exhaustive", now=NOW)
+
+        assert result["mode"] == "exhaustive"
+        hits = result["hits"]
+        ids = [h["id"] for h in hits]
+        # R が最上位(関連度 1.0)、G が続く。L は floor 未満で除外。
+        assert ids[0] == "R"
+        assert "G" in ids
+        assert "L" not in ids
+        hit_map = {h["id"]: h for h in hits}
+        # 沈んだ R が、より高活性の G より上に来ている(活性度を無視している証拠)
+        assert hit_map["R"]["activation"] < hit_map["G"]["activation"]
+        assert hit_map["R"]["via"] == "exhaustive"
+        assert hit_map["R"]["relevance"] == pytest.approx(1.0, abs=1e-5)
+
+    def test_fast_buries_what_exhaustive_surfaces(self, tmp_path):
+        """対比: 同じ沈んだ高関連記憶 R は fast では高活性 G に首位を奪われる。"""
+        embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
+        engine, db, store = _build_engine(tmp_path, embedder=embedder)
+
+        r = _fake_db_mem(id="R", type="knowledge", importance=1,
+                         created_at=NOW - 1000 * DAY, path="/tmp/R.md")
+        g = _fake_db_mem(id="G", type="preference", importance=9,
+                         created_at=NOW - DAY, path="/tmp/G.md")
+        db.all_memories.return_value = [r, g]
+        db.vector_search.return_value = [("R", 1.0), ("G", 0.6)]
+        db.keyword_search.return_value = []
+        db.get_events.return_value = {
+            "R": [(NOW - 1000 * DAY, 1.0)],
+            "G": [(NOW - DAY, 3.0), (NOW - 2 * DAY, 2.0)],
+        }
+        store.read.side_effect = lambda p: _fake_record(
+            id=Path(p).stem, content=f"{Path(p).stem} の本文"
+        )
+
+        result = engine.recall("ターゲット", mode="fast", now=NOW)
+
+        # fast は活性度を加味するので、関連度最大の R ではなく高活性 G が首位
+        assert result["hits"][0]["id"] == "G"
+
+    def test_deep_auto_escalates_to_exhaustive(self, tmp_path):
+        """deep でも最高スコアが弱いとき exhaustive へ自動エスカレーションし、
+        沈んだ高関連記憶を掘り起こすこと。"""
+        embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
+        engine, db, store = _build_engine(tmp_path, embedder=embedder)
+
+        m = _fake_db_mem(id="M", type="knowledge", importance=5,
+                         created_at=NOW - 1000 * DAY, path="/tmp/M.md")
+        db.all_memories.return_value = [m]
+        db.vector_search.return_value = [("M", 0.2)]   # fast/deep では低関連
+        db.keyword_search.return_value = []
+        db.get_events.return_value = {}                # 活性度ゼロ
+        db.get_links.return_value = []
+        # exhaustive で再計算される実コサインは高い(本来は関連の高い記憶)
+        db.get_embeddings.return_value = {
+            "M": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        }
+        store.read.return_value = _fake_record(id="M", content="本来は関連の高い記憶")
+
+        result = engine.recall("ターゲット", mode="fast", now=NOW)
+
+        assert result["auto_deepened"] is True
+        assert result["mode"] == "exhaustive"
+        assert result["hits"][0]["id"] == "M"
+        assert result["hits"][0]["relevance"] == pytest.approx(1.0, abs=1e-5)

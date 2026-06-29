@@ -60,6 +60,14 @@ class Settings:
     hop_decay: float = 0.7           # 拡散活性化のホップ毎減衰
     max_hops: int = 2
 
+    # --- 網羅検索(exhaustive: 沈んだ記憶の掘り起こし)---
+    # fast/deep は活性度を加味するため、長く使われず沈んだ記憶は関連が高くても
+    # 最終スコアで埋もれる(「忘れない記憶」なのに想起できない)。exhaustive は
+    # 活性度を無視し関連度のみで全 tier/type を総当たりするので、沈んだ記憶も
+    # 意味的に近ければ必ず浮上する。
+    exhaustive_min_relevance: float = 0.30    # これ未満の関連度は返さない(ノイズ防止のゲート)
+    exhaustive_score_threshold: float = 0.30  # deep の最高スコアがこれ未満なら exhaustive を自動発動
+
     # --- ヘッブ結合 ---
     colink_increment: float = 0.1
     colink_max: float = 1.0
