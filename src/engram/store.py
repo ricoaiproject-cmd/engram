@@ -337,3 +337,18 @@ class MarkdownStore:
                     stacklevel=2,
                 )
                 continue
+
+    def count_memory_files(self) -> int:
+        """_trash を除く .md ファイル数を軽量カウントする(frontmatter は読まない)。
+
+        起動時のインデックス同期チェック用。scan_all と同じく _trash 配下は除外する。
+        """
+        trash_dir = self._root / "_trash"
+        count = 0
+        for md_file in self._root.rglob("*.md"):
+            try:
+                md_file.relative_to(trash_dir)
+                continue  # inside _trash
+            except ValueError:
+                count += 1
+        return count

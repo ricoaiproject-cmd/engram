@@ -45,7 +45,38 @@ def _get_engine() -> MemoryEngine:
     with _engine_lock:
         if _engine is None:
             _engine = build_engine()
+            _run_startup_index_check(_engine)
     return _engine
+
+
+def _run_startup_index_check(engine: MemoryEngine) -> None:
+    """起動時に Markdown と index の乖離を検知し、auto なら reindex / warn なら警告。
+
+    記憶 Markdown は共有(例: Google Drive)でも index.db はマシンごとローカルなため、
+    他マシンが書いた記憶が index に取り込まれず recall に出ない盲点が生じる。これを
+    起動時に解消する。失敗してもエンジン提供は止めない(記憶基盤の可用性を最優先)。
+    """
+    import sys
+
+    try:
+        mode = getattr(engine.settings, "startup_index_check", "auto")
+        res = engine.check_index_freshness(mode=mode)
+        action = res.get("action")
+        if action == "reindexed":
+            print(
+                f"engram: index out of sync (markdown={res.get('markdown')} "
+                f"index={res.get('index')}) -> reindexed {res.get('reindex')}",
+                file=sys.stderr,
+            )
+        elif action == "warn":
+            print(
+                f"engram: WARNING memory index out of sync "
+                f"(markdown={res.get('markdown')} vs index={res.get('index')}). "
+                f"Run 'engram reindex' to sync this machine.",
+                file=sys.stderr,
+            )
+    except Exception as e:
+        print(f"engram: startup index check skipped: {e}", file=sys.stderr)
 
 
 def _default_room() -> str:

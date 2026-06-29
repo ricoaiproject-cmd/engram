@@ -180,6 +180,15 @@ and the room is resolved automatically from the working directory:
 - Auto-encoding and proactive recall respect rooms too, so work memories
   never leak into personal contexts (and vice versa)
 
+### Sharing memories across machines
+
+The Markdown store can live on a synced folder (e.g. a cloud drive) shared by
+several machines, but `index.db` is per-machine and local — so a memory written
+on one machine isn't searchable on another until that machine indexes it. The
+MCP server checks this at startup via `startup_index_check` in `config.toml`:
+`auto` (default) reindexes when it detects a markdown/index mismatch, `warn`
+logs a notice, `off` disables it. You can also run `engram reindex` any time.
+
 ---
 
 ## How the memory works

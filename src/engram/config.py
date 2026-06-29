@@ -68,6 +68,13 @@ class Settings:
     exhaustive_min_relevance: float = 0.30    # これ未満の関連度は返さない(ノイズ防止のゲート)
     exhaustive_score_threshold: float = 0.30  # deep の最高スコアがこれ未満なら exhaustive を自動発動
 
+    # --- 起動時インデックス同期(マルチマシン共有対策)---
+    # 記憶 Markdown は共有(例: Google Drive)でも index.db はマシンごとローカルなため、
+    # 他マシンが書いた記憶が index に無く recall に出ない盲点が生じる。MCP サーバー起動時に
+    # Markdown(非trash)件数と index(active)件数の乖離を検知して:
+    #   "auto" = 自動 reindex / "warn" = stderr に警告 / "off" = 何もしない
+    startup_index_check: str = "auto"   # "auto" | "warn" | "off"
+
     # --- ヘッブ結合 ---
     colink_increment: float = 0.1
     colink_max: float = 1.0

@@ -842,3 +842,67 @@ class TestExhaustiveRecall:
         assert result["mode"] == "exhaustive"
         assert result["hits"][0]["id"] == "M"
         assert result["hits"][0]["relevance"] == pytest.approx(1.0, abs=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# 起動時インデックス同期チェック(マルチマシン共有対策)
+# ---------------------------------------------------------------------------
+
+
+class TestIndexFreshness:
+    @staticmethod
+    def _active(n):
+        return [_fake_db_mem(id=f"M{i}") for i in range(n)]
+
+    def test_in_sync_no_reindex(self, tmp_path):
+        """Markdown 件数と index 件数が一致 → in_sync・reindex は呼ばれない。"""
+        engine, db, store = _build_engine(tmp_path)
+        store.count_memory_files.return_value = 5
+        db.all_memories.return_value = self._active(5)
+        engine.reindex = MagicMock()
+
+        res = engine.check_index_freshness(mode="auto")
+
+        assert res["action"] == "in_sync"
+        assert res["markdown"] == 5 and res["index"] == 5
+        engine.reindex.assert_not_called()
+
+    def test_auto_reindexes_on_drift(self, tmp_path):
+        """Markdown の方が多い(他マシンの未取り込み記憶)→ auto は reindex する。"""
+        engine, db, store = _build_engine(tmp_path)
+        store.count_memory_files.return_value = 10
+        db.all_memories.return_value = self._active(5)
+        engine.reindex = MagicMock(return_value={
+            "added": 5, "updated": 0, "removed": 0, "unchanged": 5})
+
+        res = engine.check_index_freshness(mode="auto")
+
+        assert res["action"] == "reindexed"
+        assert res["markdown"] == 10 and res["index"] == 5
+        engine.reindex.assert_called_once()
+
+    def test_warn_does_not_reindex(self, tmp_path):
+        """warn モードは乖離を報告するだけで reindex しない。"""
+        engine, db, store = _build_engine(tmp_path)
+        store.count_memory_files.return_value = 10
+        db.all_memories.return_value = self._active(5)
+        engine.reindex = MagicMock()
+
+        res = engine.check_index_freshness(mode="warn")
+
+        assert res["action"] == "warn"
+        assert res["drift"] == 5
+        engine.reindex.assert_not_called()
+
+    def test_off_does_nothing(self, tmp_path):
+        """off モードはカウントもせず何もしない。"""
+        engine, db, store = _build_engine(tmp_path)
+        store.count_memory_files.return_value = 10
+        db.all_memories.return_value = self._active(5)
+        engine.reindex = MagicMock()
+
+        res = engine.check_index_freshness(mode="off")
+
+        assert res["action"] == "off"
+        store.count_memory_files.assert_not_called()
+        engine.reindex.assert_not_called()

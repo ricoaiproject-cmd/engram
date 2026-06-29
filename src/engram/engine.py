@@ -967,6 +967,48 @@ class MemoryEngine:
             "unchanged": unchanged,
         }
 
+    # ------------------------------------------------ startup index freshness
+    def check_index_freshness(self, *, mode: str = "auto") -> dict:
+        """起動時のインデックス同期チェック(マルチマシン共有対策)。
+
+        記憶 Markdown は共有(例: Google Drive)でも index.db はマシンごとローカルな
+        ため、他マシンが書いた記憶が index に無く recall に一切出ない盲点が生じる。
+        Markdown(非trash)のファイル数と index の active(hot/cold/superseded)件数を
+        比較し、乖離があれば:
+          - mode="auto": reindex して同期する
+          - mode="warn": 警告情報を返す(呼び出し側がログ出力。書き込みはしない)
+          - mode="off" : 何もしない
+        返り値: {"action", "markdown", "index", ...}。action は
+        "off"/"in_sync"/"warn"/"reindexed"。
+        """
+        if mode == "off":
+            return {"action": "off"}
+
+        md_count = self.store.count_memory_files()
+        idx_count = len(self.db.all_memories(
+            tiers=["hot", "cold", "superseded"]
+        ))
+
+        if md_count == idx_count:
+            return {"action": "in_sync", "markdown": md_count, "index": idx_count}
+
+        if mode == "warn":
+            return {
+                "action": "warn",
+                "markdown": md_count,
+                "index": idx_count,
+                "drift": md_count - idx_count,
+            }
+
+        # auto: reindex して同期(他マシンの未取り込み記憶を index へ取り込む)
+        reindex_result = self.reindex()
+        return {
+            "action": "reindexed",
+            "markdown": md_count,
+            "index": idx_count,
+            "reindex": reindex_result,
+        }
+
 
 def build_engine(settings: Settings | None = None, *, embedder: Embedder | None = None
                  ) -> MemoryEngine:
