@@ -276,23 +276,25 @@ def main() -> None:
     # torch / sentence_transformers の import は非常に重い(実測: import だけで
     # cold 50秒超)。これを mcp.run() の前にメインスレッドで実行すると initialize
     # ハンドシェイクがその間ブロックされ、起動タイムアウトの短い MCP クライアント
-    # (例: Antigravity IDE)は接続を "context canceled" で打ち切ってしまう。
+    # は接続を打ち切ってしまう(実例: Antigravity IDE の "context canceled"、
+    # Claude Code の起動タイムアウト既定30秒によるコールド起動時の断続的な不通)。
     #
     # ENGRAM_PRELOAD で先読み方式を選ぶ:
-    #   blocking (既定) — 従来どおり起動時にメインスレッドで先読み。初回 recall は
-    #                     速いが、ハンドシェイクは import 完了まで待つ。
-    #   background      — 先読みをデーモンスレッドに回し、mcp.run() を即実行する。
+    #   background (既定) — 先読みをデーモンスレッドに回し、mcp.run() を即実行する。
     #                     ハンドシェイクは即応答し、モデルは裏で準備される。初回
     #                     recall はモデル準備完了までロック待ちになる。
+    #   blocking        — 起動時にメインスレッドで先読み。初回 recall は速いが、
+    #                     ハンドシェイクは import 完了まで待つため、コールド起動時に
+    #                     クライアント側の起動タイムアウトで接続が切られやすい。
     #   off             — 先読みしない。初回ツール呼び出し時に遅延ロードする。
     # FastMCP は同期ツールをワーカースレッドで実行するため、_get_engine と
     # RuriEmbedder._load はロックで多重ロードを防いでいる。
-    mode = os.environ.get("ENGRAM_PRELOAD", "blocking").strip().lower()
-    if mode == "background":
+    mode = os.environ.get("ENGRAM_PRELOAD", "background").strip().lower()
+    if mode == "blocking":
+        _preload()
+    elif mode != "off":
         threading.Thread(
             target=_preload, name="engram-preload", daemon=True
         ).start()
-    elif mode != "off":
-        _preload()
 
     mcp.run()

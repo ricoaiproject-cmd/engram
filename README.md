@@ -130,6 +130,22 @@ Valid names: `claude` / `codex` / `gemini` (`antigravity` is an alias for
 lets you pick by number (Enter selects all); `--non-interactive` registers all
 detected agents as before.
 
+### Startup mode (`ENGRAM_PRELOAD`)
+
+Loading the embedding model (torch / sentence-transformers) can take 50+
+seconds on a cold start. The `ENGRAM_PRELOAD` environment variable controls
+when that load happens:
+
+| Value | Behavior |
+|---|---|
+| `background` (default) | Respond to the MCP handshake immediately; load the model in a background thread. The first `recall` waits until the model is ready. |
+| `blocking` | Load the model before answering the handshake. First `recall` is fast, but clients with short startup timeouts (e.g. Claude Code's default 30 s) may drop the connection on a cold start. |
+| `off` | No preload; the model loads lazily on the first tool call. |
+
+If engram intermittently shows up as disconnected in your agent, make sure you
+are not overriding this to `blocking`, or raise your client's MCP startup
+timeout (for Claude Code: `MCP_TIMEOUT=120000`).
+
 ---
 
 ## More like real memory (new in v0.3)
