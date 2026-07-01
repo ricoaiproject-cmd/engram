@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from typing import Protocol
 
 import numpy as np
@@ -32,30 +33,36 @@ class RuriEmbedder:
         self._query_prefix = query_prefix
         self._doc_prefix = doc_prefix
         self._model = None
+        # FastMCP は同期ツールをワーカースレッドで実行する。background 先読みと
+        # 初回ツール呼び出しが競合してもモデルを二重ロードしないよう保護する。
+        self._lock = threading.Lock()
 
     def _load(self):
-        if self._model is None:
-            import contextlib
-            import os
-            import sys
+        if self._model is not None:
+            return self._model
+        with self._lock:
+            if self._model is None:
+                import contextlib
+                import os
+                import sys
 
-            # HF Hub への接続確認はネットワーク不調時に無限に待つことがあり、
-            # stdio MCP サーバーでは recall がハングしてセッションごと固まる。
-            # キャッシュ済みならオフラインで即ロードし、無い時だけ取りに行く。
-            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-            os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-            from sentence_transformers import SentenceTransformer
+                # HF Hub への接続確認はネットワーク不調時に無限に待つことがあり、
+                # stdio MCP サーバーでは recall がハングしてセッションごと固まる。
+                # キャッシュ済みならオフラインで即ロードし、無い時だけ取りに行く。
+                os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+                os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+                from sentence_transformers import SentenceTransformer
 
-            # stdio MCP では stdout は JSON-RPC 専用。ライブラリの迷い出力が
-            # 混ざるとプロトコルが壊れるため、ロード中は stderr に退避する
-            with contextlib.redirect_stdout(sys.stderr):
-                try:
-                    self._model = SentenceTransformer(
-                        self._model_name, local_files_only=True
-                    )
-                except Exception:
-                    # キャッシュ未取得の初回のみオンラインでダウンロード
-                    self._model = SentenceTransformer(self._model_name)
+                # stdio MCP では stdout は JSON-RPC 専用。ライブラリの迷い出力が
+                # 混ざるとプロトコルが壊れるため、ロード中は stderr に退避する
+                with contextlib.redirect_stdout(sys.stderr):
+                    try:
+                        self._model = SentenceTransformer(
+                            self._model_name, local_files_only=True
+                        )
+                    except Exception:
+                        # キャッシュ未取得の初回のみオンラインでダウンロード
+                        self._model = SentenceTransformer(self._model_name)
         return self._model
 
     @property
