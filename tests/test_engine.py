@@ -855,7 +855,7 @@ class TestIndexFreshness:
         return [_fake_db_mem(id=f"M{i}") for i in range(n)]
 
     def test_in_sync_no_reindex(self, tmp_path):
-        """Markdown 件数と index 件数が一致 → in_sync・reindex は呼ばれない。"""
+        """raw .md 件数と index 件数が一致 → in_sync・scan も reindex もしない。"""
         engine, db, store = _build_engine(tmp_path)
         store.count_memory_files.return_value = 5
         db.all_memories.return_value = self._active(5)
@@ -865,20 +865,37 @@ class TestIndexFreshness:
 
         assert res["action"] == "in_sync"
         assert res["markdown"] == 5 and res["index"] == 5
+        store.scan_all.assert_not_called()
         engine.reindex.assert_not_called()
 
-    def test_auto_reindexes_on_drift(self, tmp_path):
-        """Markdown の方が多い(他マシンの未取り込み記憶)→ auto は reindex する。"""
+    def test_phantom_md_counts_as_in_sync(self, tmp_path):
+        """raw .md が index より多くても、scan_all の有効件数が一致すれば
+        (空/壊れた/非記憶 md による見かけ上のズレ)reindex しない。"""
+        engine, db, store = _build_engine(tmp_path)
+        store.count_memory_files.return_value = 6      # phantom 1件込み
+        db.all_memories.return_value = self._active(5)
+        store.scan_all.return_value = [object()] * 5    # 有効な記憶は5件
+        engine.reindex = MagicMock()
+
+        res = engine.check_index_freshness(mode="auto")
+
+        assert res["action"] == "in_sync"
+        assert res["valid"] == 5
+        engine.reindex.assert_not_called()
+
+    def test_auto_reindexes_on_real_drift(self, tmp_path):
+        """有効な記憶が index より多い(他マシンの未取り込み)→ auto は reindex。"""
         engine, db, store = _build_engine(tmp_path)
         store.count_memory_files.return_value = 10
         db.all_memories.return_value = self._active(5)
+        store.scan_all.return_value = [object()] * 10
         engine.reindex = MagicMock(return_value={
             "added": 5, "updated": 0, "removed": 0, "unchanged": 5})
 
         res = engine.check_index_freshness(mode="auto")
 
         assert res["action"] == "reindexed"
-        assert res["markdown"] == 10 and res["index"] == 5
+        assert res["valid"] == 10 and res["index"] == 5
         engine.reindex.assert_called_once()
 
     def test_warn_does_not_reindex(self, tmp_path):
@@ -886,6 +903,7 @@ class TestIndexFreshness:
         engine, db, store = _build_engine(tmp_path)
         store.count_memory_files.return_value = 10
         db.all_memories.return_value = self._active(5)
+        store.scan_all.return_value = [object()] * 10
         engine.reindex = MagicMock()
 
         res = engine.check_index_freshness(mode="warn")

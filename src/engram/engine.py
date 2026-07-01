@@ -990,14 +990,29 @@ class MemoryEngine:
         ))
 
         if md_count == idx_count:
+            # 速い経路: raw .md 件数が一致すれば同期済みとみなし、走査しない
             return {"action": "in_sync", "markdown": md_count, "index": idx_count}
+
+        # 件数が違う。空ファイル・壊れた frontmatter・id 無しの非記憶 .md による
+        # 見かけ上のズレかもしれない(scan_all はそれらをスキップする)。無駄な
+        # reindex を避けるため、index と同じ「有効な記憶」母集団で正確に数え直す。
+        valid_count = sum(1 for _ in self.store.scan_all())
+        if valid_count == idx_count:
+            return {
+                "action": "in_sync",
+                "markdown": md_count,
+                "index": idx_count,
+                "valid": valid_count,
+                "note": "raw .md 件数差は空/壊れた/非記憶 md による見かけ上のもの",
+            }
 
         if mode == "warn":
             return {
                 "action": "warn",
                 "markdown": md_count,
                 "index": idx_count,
-                "drift": md_count - idx_count,
+                "valid": valid_count,
+                "drift": valid_count - idx_count,
             }
 
         # auto: reindex して同期(他マシンの未取り込み記憶を index へ取り込む)
@@ -1006,6 +1021,7 @@ class MemoryEngine:
             "action": "reindexed",
             "markdown": md_count,
             "index": idx_count,
+            "valid": valid_count,
             "reindex": reindex_result,
         }
 
