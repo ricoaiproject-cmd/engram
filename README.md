@@ -138,13 +138,13 @@ when that load happens:
 
 | Value | Behavior |
 |---|---|
-| `background` (default) | Respond to the MCP handshake immediately; load the model in a background thread. The first `recall` waits until the model is ready. |
-| `blocking` | Load the model before answering the handshake. First `recall` is fast, but clients with short startup timeouts (e.g. Claude Code's default 30 s) may drop the connection on a cold start. |
-| `off` | No preload; the model loads lazily on the first tool call. |
+| `blocking` (default) | Load the model on the main thread before answering the handshake (~12–24 s warm, 50+ s cold). Every `recall` after connect responds instantly. Raise your client's MCP startup timeout to 120 s or more (for Claude Code: `MCP_TIMEOUT=120000`). |
+| `background` | Respond to the handshake immediately and load the model in a background thread. **Caution:** on Windows, importing torch on a non-main thread while the asyncio event loop is running is pathologically slow (measured ~184 s vs ~20 s on the main thread), so the first `recall` can exceed the client's tool timeout. Use only if you cannot raise the startup timeout at all. |
+| `off` | No preload; the model loads lazily on the first tool call (hits the same slow-thread-import path as `background`). |
 
-If engram intermittently shows up as disconnected in your agent, make sure you
-are not overriding this to `blocking`, or raise your client's MCP startup
-timeout (for Claude Code: `MCP_TIMEOUT=120000`).
+If engram fails to connect at startup, raise the client's MCP startup timeout
+(for Claude Code: `MCP_TIMEOUT=120000`) rather than switching to `background` —
+that only converts a visible startup timeout into a 3-minute first `recall`.
 
 ---
 

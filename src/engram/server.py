@@ -279,17 +279,30 @@ def main() -> None:
     # は接続を打ち切ってしまう(実例: Antigravity IDE の "context canceled"、
     # Claude Code の起動タイムアウト既定30秒によるコールド起動時の断続的な不通)。
     #
+    # 一方で、mcp.run() のイベントループ稼働中に「別スレッドで」この import を行うと
+    # Windows では桁違いに遅くなる(実測: メインスレッド 12〜24秒 → デーモン/ワーカー
+    # スレッド 約184秒。2026-07-02 の Claude Code MCP ログ2セッションで再現)。
+    # background 先読みはハンドシェイクこそ1.5秒で返すが、初回 recall がこの遅い
+    # ロードを待って 180 秒級になり、クライアントのツールタイムアウトに化ける。
+    # イベントループ停止中のスレッド import は 6 秒で終わる(単体では再現しない)
+    # ため、ループとの GIL/DLL ローダー競合とみられる。教訓: 重い import は
+    # イベントループが動き出す前にメインスレッドで済ませるのが唯一速い経路。
+    #
     # ENGRAM_PRELOAD で先読み方式を選ぶ:
-    #   background (既定) — 先読みをデーモンスレッドに回し、mcp.run() を即実行する。
-    #                     ハンドシェイクは即応答し、モデルは裏で準備される。初回
-    #                     recall はモデル準備完了までロック待ちになる。
-    #   blocking        — 起動時にメインスレッドで先読み。初回 recall は速いが、
-    #                     ハンドシェイクは import 完了まで待つため、コールド起動時に
-    #                     クライアント側の起動タイムアウトで接続が切られやすい。
-    #   off             — 先読みしない。初回ツール呼び出し時に遅延ロードする。
+    #   blocking (既定)  — 起動時にメインスレッドで先読み。ハンドシェイクは import
+    #                     完了まで待つ(warm 12〜24秒 / cold 50秒超)ため、クライアント
+    #                     側の MCP 起動タイムアウトを 120 秒以上にすること(Claude
+    #                     Code は settings.json の env で MCP_TIMEOUT=120000)。
+    #                     接続後の recall は常に即応答する。
+    #   background      — 先読みをデーモンスレッドに回し、mcp.run() を即実行する。
+    #                     ハンドシェイクは即応答するが、上記の病理により Windows では
+    #                     初回 recall が 3 分級になりうる。起動タイムアウトを一切
+    #                     延ばせないクライアント向けの妥協案。
+    #   off             — 先読みしない。初回ツール呼び出し時に遅延ロードする
+    #                     (background と同じ病理を踏む)。
     # FastMCP は同期ツールをワーカースレッドで実行するため、_get_engine と
     # RuriEmbedder._load はロックで多重ロードを防いでいる。
-    mode = os.environ.get("ENGRAM_PRELOAD", "background").strip().lower()
+    mode = os.environ.get("ENGRAM_PRELOAD", "blocking").strip().lower()
     if mode == "blocking":
         _preload()
     elif mode != "off":
