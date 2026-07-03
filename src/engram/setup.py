@@ -856,6 +856,92 @@ def find_install_remnants(purelib: Path | None = None) -> list[str]:
     return sorted(p.name for p in purelib.glob("~*gram*"))
 
 
+def check_fts5() -> tuple[str, str]:
+    """FTS5(trigram トークナイザ)の可否を診断する。(status, detail) を返す。
+
+    インメモリ DB で `tokenize='trigram'` の FTS5 仮想テーブルを実際に作って
+    確認する(SQLite>=3.34 が必要)。失敗時は db.py の keyword_search が
+    OperationalError を握りつぶしてベクトル検索のみに黙って縮退する旨を注記する
+    (無音の劣化なのでここで顕在化させる)。
+    """
+    import sqlite3
+
+    sqlite_version = sqlite3.sqlite_version
+    try:
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE t USING fts5"
+                "(content, tokenize='trigram')"
+            )
+        finally:
+            conn.close()
+        return "[OK]", f"sqlite3 {sqlite_version}"
+    except sqlite3.OperationalError:
+        return "[NG]", (
+            f"sqlite3 {sqlite_version}(trigram 非対応)。"
+            "keyword_search が無音でベクトル検索のみに縮退します"
+        )
+
+
+def summarize_perf(perf_log_path: Path, max_lines: int = 500) -> tuple[str, str]:
+    """perf_log.jsonl の直近エントリから recall p50 / preload の要約を作る。
+
+    (status, detail) を返す。ファイルが無ければ [--] と未記録の案内。壊れた行
+    (JSON でない・キー欠落)はスキップする。
+    """
+    if not perf_log_path.is_file():
+        return "[--]", "未記録(初回のツール呼び出し後に生成)"
+
+    try:
+        with perf_log_path.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return "[NG]", f"読み取りエラー: {perf_log_path}"
+
+    tail = lines[-max_lines:]
+    recall_ms: list[float] = []
+    last_preload_ms: float | None = None
+    n_parsed = 0
+
+    for line in tail:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            kind = entry["kind"]
+            ms = float(entry["ms"])
+        except Exception:
+            continue
+        n_parsed += 1
+        if kind == "tool" and entry.get("name") == "recall":
+            recall_ms.append(ms)
+        elif kind == "preload":
+            last_preload_ms = ms
+
+    if n_parsed == 0:
+        return "[--]", "有効な記録なし"
+
+    detail_parts = []
+    if recall_ms:
+        recall_ms.sort()
+        mid = len(recall_ms) // 2
+        if len(recall_ms) % 2 == 0:
+            p50 = (recall_ms[mid - 1] + recall_ms[mid]) / 2
+        else:
+            p50 = recall_ms[mid]
+        detail_parts.append(f"recall p50 {p50:.0f}ms")
+    if last_preload_ms is not None:
+        detail_parts.append(f"preload {last_preload_ms:.0f}ms")
+
+    if not detail_parts:
+        return "[--]", f"recall/preload の記録なし(直近{n_parsed}件)"
+
+    detail = " / ".join(detail_parts) + f"(直近{n_parsed}件)"
+    return "[OK]", detail
+
+
 def doctor_main(
     *,
     engram_home: Path | None = None,
@@ -897,6 +983,10 @@ def doctor_main(
     _conn.close()
     row("SQLite 拡張ロード対応", "[OK]" if ext_ok else "[NG]",
         "" if ext_ok else "uv 管理の Python で入れ直してください(README 参照)")
+
+    # FTS5(trigram)対応。非対応だと keyword_search が無音でベクトル検索のみに縮退する
+    fts5_status, fts5_detail = check_fts5()
+    row("FTS5(trigram)対応", fts5_status, fts5_detail)
 
     # pip 再インストール失敗の残骸(~ngram 等)があると import 自体が壊れる
     remnants = find_install_remnants()
@@ -1046,6 +1136,18 @@ def doctor_main(
         row("surface_mode", "[OK]", f"{mode}({detail})")
     except Exception:
         row("surface_mode", "[NG]", "設定読み取りエラー")
+
+    # perf ログ要約(recall p50 / preload 直近値)。ツール呼び出しの体感速度を診断する
+    try:
+        _settings_perf = get_settings()
+        perf_log_path = _settings_perf.data_dir / "perf" / "perf_log.jsonl"
+        if not _settings_perf.perf_log:
+            row("perf ログ", "[--]", "無効化されています(settings.perf_log=false)")
+        else:
+            perf_status, perf_detail = summarize_perf(perf_log_path)
+            row("perf ログ", perf_status, perf_detail)
+    except Exception:
+        row("perf ログ", "[NG]", "設定読み取りエラー")
 
     print()
 

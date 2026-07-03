@@ -10,7 +10,13 @@ from engram.config import get_settings
 from engram.db import IndexDB
 from engram.embedder import FakeEmbedder
 from engram.engine import MemoryEngine
-from engram.hooks import run_session_end, run_user_prompt
+from engram.hooks import (
+    _consolidation_nudge,
+    _read_consolidation_state,
+    _write_consolidation_state,
+    run_session_end,
+    run_user_prompt,
+)
 from engram.setup import (
     merge_config_toml,
     read_config_toml,
@@ -18,6 +24,9 @@ from engram.setup import (
     write_config_toml,
 )
 from engram.store import MarkdownStore
+
+DAY = 86400.0
+NOW = 1_750_000_000.0
 
 
 @pytest.fixture
@@ -182,6 +191,174 @@ def test_user_prompt_skips_system_text(engram_home):
         assert run_user_prompt(json.dumps({
             "session_id": "s", "prompt": noise, "cwd": ""})) == 0
     assert not (engram_home / "surface" / "surface_log.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
+# ③ 統合の自動促し(consolidation nudge)
+# ---------------------------------------------------------------------------
+
+class TestConsolidationNudge:
+    """_consolidation_nudge の単体テスト(状態ファイルの読み書きのみ、エンジン不使用)。"""
+
+    def test_nudge_fires_when_clusters_at_threshold(self, engram_home):
+        """クラスタ数が閾値以上・最終促しが古ければ促し文が返ること。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 3,  # consolidate_nudge_min_clusters の既定値と同数
+            "last_nudged_at": NOW - 30 * DAY,  # 十分に古い
+        })
+
+        msg = _consolidation_nudge(settings, now=NOW)
+        assert msg is not None
+        assert "3" in msg
+        assert "consolidation_candidates" in msg
+        assert "mark_consolidated" in msg
+
+    def test_nudge_stamps_last_nudged_at(self, engram_home):
+        """促し文を返した際に last_nudged_at が更新されること。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 5, "last_nudged_at": 0.0,
+        })
+
+        msg = _consolidation_nudge(settings, now=NOW)
+        assert msg is not None
+
+        state = _read_consolidation_state(settings)
+        assert state["last_nudged_at"] == NOW
+
+    def test_nudge_throttled_on_second_immediate_call(self, engram_home):
+        """促し直後の再呼び出しは None を返すこと(最短間隔でスロットル)。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 4, "last_nudged_at": NOW - 30 * DAY,
+        })
+
+        first = _consolidation_nudge(settings, now=NOW)
+        assert first is not None
+
+        # 直後の2回目呼び出し(last_nudged_at がスタンプされたばかり)
+        second = _consolidation_nudge(settings, now=NOW + 1.0)
+        assert second is None
+
+    def test_no_nudge_below_cluster_threshold(self, engram_home):
+        """クラスタ数が閾値未満なら促さないこと。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 2,  # min_clusters(既定3)未満
+            "last_nudged_at": NOW - 30 * DAY,
+        })
+
+        assert _consolidation_nudge(settings, now=NOW) is None
+
+    def test_no_nudge_when_interval_not_elapsed(self, engram_home):
+        """最短間隔(既定7日)が経過していなければ促さないこと。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 5,
+            "last_nudged_at": NOW - 1 * DAY,  # 7日未満しか経っていない
+        })
+
+        assert _consolidation_nudge(settings, now=NOW) is None
+
+    def test_no_nudge_when_setting_disabled(self, engram_home):
+        """consolidate_nudge=False なら閾値・間隔を満たしていても促さないこと。"""
+        (engram_home / "config.toml").write_text(
+            "consolidate_nudge = false\n", encoding="utf-8",
+        )
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 10, "last_nudged_at": NOW - 30 * DAY,
+        })
+
+        assert _consolidation_nudge(settings, now=NOW) is None
+
+    def test_nudge_works_even_when_surface_mode_off(self, engram_home):
+        """surface_mode='off' でもナッジ自体は独立して発火すること。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        settings = get_settings()
+        assert settings.surface_mode == "off"
+        _write_consolidation_state(settings, {
+            "clusters": 3, "last_nudged_at": NOW - 30 * DAY,
+        })
+
+        assert _consolidation_nudge(settings, now=NOW) is not None
+
+
+class TestConsolidationNudgeViaUserPrompt:
+    """run_user_prompt を通じたナッジの結線テスト(additionalContext への反映)。"""
+
+    def test_user_prompt_emits_nudge_when_surface_mode_off(self, engram_home,
+                                                            capsys):
+        """surface_mode=off で surface 由来の文脈が無くても、ナッジが単独で
+        additionalContext を発生させること。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 3, "last_nudged_at": 0.0,
+        })
+
+        stdin = json.dumps({
+            "session_id": "sess-nudge-1",
+            "prompt": "次の作業を始めましょうか",
+            "cwd": "C:/anywhere",
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert "consolidation_candidates" in ctx
+        assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+
+    def test_user_prompt_no_nudge_below_threshold(self, engram_home, capsys):
+        """閾値未満のクラスタ数では additionalContext が出ないこと
+        (surface も無関係のため何も出力されない)。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 1, "last_nudged_at": 0.0,
+        })
+
+        stdin = json.dumps({
+            "session_id": "sess-nudge-2",
+            "prompt": "次の作業を始めましょうか",
+            "cwd": "C:/anywhere",
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        assert out.strip() == ""
+
+
+class TestSessionEndWritesConsolidationState:
+    def test_run_session_end_writes_state_file(self, engram_home, tmp_path,
+                                                monkeypatch):
+        """run_session_end が auto-encode 後に consolidation_state.json を書き、
+        clusters キーを持つこと(consolidate_nudge が既定 True の場合)。"""
+        import engram.engine
+        monkeypatch.setattr(engram.engine, "build_engine", _fake_build_engine)
+
+        transcript = tmp_path / "t.jsonl"
+        _write_transcript(transcript)
+        stdin = json.dumps({
+            "session_id": "sess-nudge-state",
+            "transcript_path": str(transcript),
+            "cwd": "C:/proj/demo",
+        })
+
+        assert run_session_end(stdin) == 0
+
+        settings = get_settings()
+        state_path = settings.data_dir / "consolidation_state.json"
+        assert state_path.is_file()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert "clusters" in state
+        assert "checked_at" in state
 
 
 # ---------------------------------------------------------------------------

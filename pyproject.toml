@@ -1,6 +1,6 @@
 [project]
 name = "engram"
-version = "0.6.0"
+version = "0.7.0"
 description = "Human-like memory MCP server for AI agents: activation decay, associative recall, error-driven encoding"
 requires-python = ">=3.12"
 # 配布時のつまずきを減らすため、埋め込みモデルの実行系も既定の依存に含める。

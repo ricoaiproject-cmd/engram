@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import json
 import sys
+import time
 from pathlib import Path
 
 from .config import Settings, get_settings, resolve_room
@@ -102,6 +103,65 @@ def _mark_encoded(settings: Settings, session_id: str) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# 統合の自動促し(consolidation nudge)
+#
+# 要約は LLM(エージェント)にしかできないため、engram 自身は統合を実行できない。
+# 代わりに SessionEnd で候補クラスタ数を状態ファイルへ棚卸しし、次のセッションの
+# UserPromptSubmit(軽量経路)が閾値超過を検知したらエージェントに統合作業を促す。
+# 人間の「睡眠中の記憶整理」を、エージェントの手が空いた瞬間に移した設計。
+# ---------------------------------------------------------------------------
+
+def _consolidation_state_path(settings: Settings) -> Path:
+    return settings.data_dir / "consolidation_state.json"
+
+
+def _read_consolidation_state(settings: Settings) -> dict:
+    try:
+        return json.loads(
+            _consolidation_state_path(settings).read_text(encoding="utf-8")
+        )
+    except Exception:
+        return {}
+
+
+def _write_consolidation_state(settings: Settings, updates: dict) -> None:
+    state = _read_consolidation_state(settings)
+    state.update(updates)
+    path = _consolidation_state_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def _consolidation_nudge(settings: Settings, now: float | None = None) -> str | None:
+    """統合候補が溜まっていたら促し文を返す(エンジン不使用の軽量判定)。
+
+    促し過ぎはノイズなので、クラスタ数の閾値と促しの最短間隔の両方で絞る。
+    状態ファイルへの記録に失敗したときは促さない(毎プロンプト促す事故防止)。
+    """
+    if not settings.consolidate_nudge:
+        return None
+    state = _read_consolidation_state(settings)
+    clusters = int(state.get("clusters", 0) or 0)
+    if clusters < settings.consolidate_nudge_min_clusters:
+        return None
+    ts = now if now is not None else time.time()
+    last = float(state.get("last_nudged_at", 0.0) or 0.0)
+    if ts - last < settings.consolidate_nudge_interval_days * 86400.0:
+        return None
+    try:
+        _write_consolidation_state(settings, {"last_nudged_at": ts})
+    except OSError:
+        return None
+    return (
+        f"(engram 記憶整理) 統合候補の episode が {clusters} クラスタ溜まっています。"
+        "区切りの良いところで consolidation_candidates を呼び、クラスタごとに"
+        "内容を要約して remember(type=knowledge, 元クラスタの経緯を残す)で保存し、"
+        "mark_consolidated(episode_ids, new_memory_id) で元 episode を降格して"
+        "ください(人間の睡眠中の記憶整理に相当する保守作業です)。"
+    )
+
+
 def run_session_end(stdin_text: str | None = None) -> int:
     """SessionEnd フック本体。常に 0 を返す(セッション終了を妨げない)。"""
     try:
@@ -153,6 +213,20 @@ def run_session_end(stdin_text: str | None = None) -> int:
             source="auto-encode",
             room=room,
         )
+        # 統合候補の棚卸し(エンジン構築済みなので追加コストは僅か)。
+        # 候補数を状態ファイルへ書き、次セッションの user-prompt が促す
+        if settings.consolidate_nudge:
+            try:
+                n_clusters = len(
+                    engine.consolidation_candidates().get("clusters", [])
+                )
+                _write_consolidation_state(
+                    settings,
+                    {"clusters": n_clusters, "checked_at": time.time()},
+                )
+            except Exception as e:
+                _log(settings, f"session-end 統合候補チェック失敗: {e!r}")
+
         engine.db.close()
         _mark_encoded(settings, session_id)
         _log(
@@ -180,9 +254,6 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
     except Exception:
         return 0
     try:
-        if settings.surface_mode == "off":
-            return 0
-
         data = _read_stdin_json(stdin_text)
         prompt = str(data.get("prompt", ""))
         session_id = str(data.get("session_id", "")) or "unknown"
@@ -194,24 +265,33 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
         if _is_non_human(stripped):  # システム/ハーネスのテキストは対象外
             return 0
 
-        room = resolve_room(cwd, settings.room_paths)
+        context_parts: list[str] = []
 
-        from .surface import format_context, run_surface
+        if settings.surface_mode != "off":
+            room = resolve_room(cwd, settings.room_paths)
 
-        result = run_surface(
-            prompt,
-            settings=settings,
-            room=room,
-            session_id=session_id,
-        )
+            from .surface import format_context, run_surface
 
-        if settings.surface_mode == "active" and result.get("surfaced_items"):
+            result = run_surface(
+                prompt,
+                settings=settings,
+                room=room,
+                session_id=session_id,
+            )
+
+            if settings.surface_mode == "active" and result.get("surfaced_items"):
+                context_parts.append(format_context(result["surfaced_items"]))
+
+        # 統合の促し(surface とは独立。consolidate_nudge 設定でゲート)
+        nudge = _consolidation_nudge(settings)
+        if nudge:
+            context_parts.append(nudge)
+
+        if context_parts:
             payload = {
                 "hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
-                    "additionalContext": format_context(
-                        result["surfaced_items"]
-                    ),
+                    "additionalContext": "\n\n".join(context_parts),
                 }
             }
             print(json.dumps(payload, ensure_ascii=False))

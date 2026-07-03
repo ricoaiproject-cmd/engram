@@ -102,8 +102,13 @@ engram doctor
 
 Shows Python version, config file, model cache, embedding backend
 (ONNX / torch), install health (detects leftover `~ngram`-style remnants of a
-failed pip reinstall that break `import engram`), and per-agent registration
-status as `[OK]` / `[NG]` / `[--]`.
+failed pip reinstall that break `import engram`), per-agent registration
+status as `[OK]` / `[NG]` / `[--]`, FTS5 availability (whether SQLite's
+full-text search extension is loaded, since keyword search silently degrades
+without it), and a perf summary section that surfaces recent MCP tool-call
+and startup timings recorded to `data_dir/perf/perf_log.jsonl` (see below) so
+a "something feels slow" complaint can be diagnosed from data rather than
+guesswork.
 
 ### Re-run setup (e.g. after installing a new agent)
 
@@ -271,6 +276,20 @@ activation = how easily it comes to mind.
 Vector neighbors (Ruri-v3 embeddings) + BM25 full-text search merged with
 RRF, then re-ranked by `0.6·relevance + 0.25·activation + 0.15·importance`.
 
+#### Hybrid recall: exact tokens no longer sink
+
+Candidate relevance now blends the two search paths instead of collapsing FTS
+hits onto the vector similarity scale: vector hits keep their cosine
+similarity, and FTS hits get a lexical relevance `1 - exp(bm25)` derived
+directly from BM25 (0 for `bm25 >= 0`). When an id is hit by both, the higher
+of the two wins. Rare, decisive lexical matches — memory IDs, file paths,
+error codes, other exact tokens — now push `bm25` deep negative and surface
+`lex` near 1.0, clearing the compressed 0.8–0.87 band where Ruri-v3 cosine
+similarities tend to cluster. Previously, FTS-only hits were assigned the
+minimum vector similarity among the candidate pool, which buried exact-match
+results at the bottom of the ranking even when they were the obviously
+correct answer.
+
 ### Memory types
 
 | type | Contents |
@@ -290,6 +309,8 @@ RRF, then re-ranked by `0.6·relevance + 0.25·activation + 0.15·importance`.
   ONBOARDING.md      Initial interview script
   surface/           Proactive recall log and session state
   hooks.log          Hook activity log
+  consolidation_state.json  Candidate-cluster count + last-nudge timestamp (consolidation nudge)
+  perf/perf_log.jsonl       Timing log for MCP tool calls and startup (when perf_log = true)
 
 <memories_dir>/      Source of truth: Markdown (opens and edits fine in Obsidian)
   knowledge/
@@ -323,6 +344,31 @@ Example nightly run:
 ```powershell
 claude -p "Call engram's consolidation_candidates, summarize each cluster with remember (type=knowledge or project, related_ids=the source episodes), finish with mark_consolidated, then report stats."
 ```
+
+#### Automatic nudge cycle
+
+On top of the cron-style nightly run above, engram nudges the agent to
+consolidate on its own, without any scheduled job:
+
+1. **SessionEnd** counts how many consolidation-candidate clusters currently
+   exist (via `consolidation_candidates`) and stores the count in
+   `data_dir/consolidation_state.json`.
+2. **UserPromptSubmit** (the same lightweight hook that powers proactive
+   recall) checks that state on the next session and, if enough clusters have
+   piled up and enough time has passed since the last nudge, injects an
+   `additionalContext` message asking the agent to run
+   `consolidation_candidates` → `remember` → `mark_consolidated` at a natural
+   pause in the conversation. The nudge fires even when `surface_mode = "off"`
+   — it is independent of proactive recall.
+
+Controlled by three settings (in `config.toml` or as `ENGRAM_*` environment
+variables):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `consolidate_nudge` | `true` | Master switch for the nudge cycle |
+| `consolidate_nudge_min_clusters` | `3` | Minimum candidate clusters before nudging |
+| `consolidate_nudge_interval_days` | `7.0` | Minimum time between nudges |
 
 ---
 

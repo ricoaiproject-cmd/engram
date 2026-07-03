@@ -90,6 +90,19 @@ class Settings:
     consolidate_min_age_days: int = 14
     consolidate_cluster_sim: float = 0.75
 
+    # --- 統合の自動促し(consolidation nudge)---
+    # engram は LLM を持たないため要約(統合の本体)はエージェントにしかできない。
+    # SessionEnd で候補クラスタ数を棚卸しし、閾値超過なら UserPromptSubmit が
+    # additionalContext でエージェントに統合作業を促す(hooks.py 参照)。
+    consolidate_nudge: bool = True
+    consolidate_nudge_min_clusters: int = 3     # このクラスタ数以上で促す
+    consolidate_nudge_interval_days: float = 7.0  # 促しの最短間隔
+
+    # --- 観測性(perf ログ)---
+    # MCP ツール呼び出しと起動(preload)の所要時間を data_dir/perf/perf_log.jsonl
+    # に記録する。「調子が悪い」をデータで診断するための常時計測(軽量)。
+    perf_log: bool = True
+
     # --- 自動符号化(セッション終了フック)---
     auto_encode: bool = True             # SessionEnd フックでの自動 episode 保存
     auto_episode_importance: int = 3     # 自動要約 episode の importance(粗い記録なので低め)

@@ -674,3 +674,72 @@ class TestFindInstallRemnants:
         from engram.setup import find_install_remnants
 
         assert find_install_remnants(tmp_path / "nope") == []
+
+
+# ---------------------------------------------------------------------------
+# doctor の診断ヘルパー(FTS5/trigram 対応・perf ログ要約)
+
+
+class TestCheckFts5:
+    def test_ok_on_this_machine(self):
+        from engram.setup import check_fts5
+
+        status, detail = check_fts5()
+        assert status == "[OK]"
+        assert detail  # sqlite バージョン文字列が入っている
+
+
+class TestSummarizePerf:
+    def test_missing_file_reports_not_recorded(self, tmp_path):
+        from engram.setup import summarize_perf
+
+        status, detail = summarize_perf(tmp_path / "no_such" / "perf_log.jsonl")
+        assert status == "[--]"
+        assert "未記録" in detail
+
+    def test_median_and_last_preload_are_reported(self, tmp_path):
+        from engram.setup import summarize_perf
+
+        log = tmp_path / "perf_log.jsonl"
+        entries = [
+            {"ts": 1.0, "kind": "tool", "name": "recall", "ms": 10.0, "ok": True},
+            {"ts": 2.0, "kind": "tool", "name": "recall", "ms": 20.0, "ok": True},
+            {"ts": 3.0, "kind": "tool", "name": "recall", "ms": 30.0, "ok": True},
+            # 別ツールの記録は recall の中央値に影響しない
+            {"ts": 4.0, "kind": "tool", "name": "remember", "ms": 999.0, "ok": True},
+            {"ts": 5.0, "kind": "preload", "name": "preload", "ms": 1000.0, "ok": True},
+            {"ts": 6.0, "kind": "preload", "name": "preload", "ms": 1850.0, "ok": True},
+        ]
+        log.write_text(
+            "\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8"
+        )
+        status, detail = summarize_perf(log)
+        assert status == "[OK]"
+        assert "recall p50 20ms" in detail
+        # 最新の preload エントリ(直近)が使われる
+        assert "preload 1850ms" in detail
+
+    def test_malformed_lines_are_skipped(self, tmp_path):
+        from engram.setup import summarize_perf
+
+        log = tmp_path / "perf_log.jsonl"
+        good = {"ts": 1.0, "kind": "tool", "name": "recall", "ms": 40.0, "ok": True}
+        lines = [
+            "not json at all",
+            json.dumps({"ts": 2.0, "kind": "tool"}),  # ms 欠落
+            json.dumps(good),
+            "",  # 空行
+        ]
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        status, detail = summarize_perf(log)
+        assert status == "[OK]"
+        assert "recall p50 40ms" in detail
+        assert "直近1件" in detail
+
+    def test_no_valid_entries_reports_dashes(self, tmp_path):
+        from engram.setup import summarize_perf
+
+        log = tmp_path / "perf_log.jsonl"
+        log.write_text("garbage\nmore garbage\n", encoding="utf-8")
+        status, detail = summarize_perf(log)
+        assert status == "[--]"

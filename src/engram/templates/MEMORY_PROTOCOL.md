@@ -67,6 +67,14 @@
 - セッション終了時の要約 episode はフックが自動保存する環境がある。その場合も
   本プロトコルの remember は省略しない — 自動要約は粗い記録であり、
   知見・好み・訂正はその場で remember するのが正である。
+- 文脈に「(engram 記憶整理)」として統合の促し(consolidation nudge)が
+  差し込まれることがある。これは古い episode 記憶が一定クラスタ数以上溜まった
+  ときに自動で届く合図であり、無視してよい通知ではない。**区切りの良い
+  タイミングで**必ず対応すること: `consolidation_candidates` を呼び、
+  返ってきたクラスタごとに内容を要約して `remember`(type=knowledge、
+  元クラスタの経緯を残す)で保存し、`mark_consolidated(episode_ids, new_memory_id)`
+  で元 episode を降格する。これは人間でいう睡眠中の記憶整理に相当する保守作業で、
+  あなたにしかできない(engram 自身は要約できない)。
 
 ## 6. してはいけないこと
 

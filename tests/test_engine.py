@@ -17,7 +17,7 @@ import pytest
 
 from engram.config import Settings
 from engram.embedder import FakeEmbedder
-from engram.engine import MemoryEngine, _hit_to_dict
+from engram.engine import MemoryEngine, _hit_to_dict, _hybrid_relevances, build_engine
 from engram.models import MemoryRecord, RecallHit
 
 # ---------------------------------------------------------------------------
@@ -924,3 +924,123 @@ class TestIndexFreshness:
         assert res["action"] == "off"
         store.count_memory_files.assert_not_called()
         engine.reindex.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _hybrid_relevances(ハイブリッド検索の relevance 合成)テスト
+# ---------------------------------------------------------------------------
+
+class TestHybridRelevances:
+    def test_fts_only_rare_token_gives_high_relevance(self):
+        """FTS のみヒットした希少トークン(bm25≒-6)は 1-exp(-6)≒0.9975 になること。"""
+        rel = _hybrid_relevances([], [("ID1", -6.0)])
+        assert rel == {"ID1": pytest.approx(0.9975212478233336, abs=1e-9)}
+
+    def test_common_word_fts_gives_lower_relevance(self):
+        """ありふれた語の FTS ヒット(bm25≒-0.5)は 1-exp(-0.5)≒0.3935 になること。"""
+        rel = _hybrid_relevances([], [("ID1", -0.5)])
+        assert rel["ID1"] == pytest.approx(1.0 - math.exp(-0.5), abs=1e-9)
+
+    def test_both_hit_takes_max(self):
+        """ベクトルと FTS の両方にヒットした id は大きい方の値を採ること。"""
+        # ベクトル cos=0.5 だが FTS の bm25=-6(lex≒0.9975)の方が大きい → lex を採用
+        rel = _hybrid_relevances([("ID1", 0.5)], [("ID1", -6.0)])
+        assert rel["ID1"] == pytest.approx(1.0 - math.exp(-6.0), abs=1e-9)
+
+        # 逆にベクトル cos=0.99 が FTS の弱いヒット(bm25=-0.1, lex≒0.095)より大きい
+        rel2 = _hybrid_relevances([("ID2", 0.99)], [("ID2", -0.1)])
+        assert rel2["ID2"] == pytest.approx(0.99, abs=1e-9)
+
+    def test_bm25_zero_or_positive_gives_zero(self):
+        """bm25 が 0 または正値の場合 lex は 0.0 になること(bm25<0 のみ有効)。"""
+        rel = _hybrid_relevances([], [("ID1", 0.0), ("ID2", 3.5)])
+        assert rel["ID1"] == 0.0
+        assert rel["ID2"] == 0.0
+
+    def test_empty_inputs_give_empty_dict(self):
+        """vec_results / kw_results が両方空なら空 dict を返すこと。"""
+        assert _hybrid_relevances([], []) == {}
+
+    def test_vector_only_keeps_cosine(self):
+        """ベクトルのみヒットした id はそのままコサイン類似度を保持すること。"""
+        rel = _hybrid_relevances([("ID1", 0.72)], [])
+        assert rel == {"ID1": 0.72}
+
+
+class TestHybridRelevanceIntegration:
+    def test_rare_token_ranks_first_via_recall(self, tmp_path):
+        """recall を通じて: 希少な完全一致トークンを含む記憶が、他の記憶の
+        方がベクトル類似度(フェイク)が高くても検索結果の首位に来ること。
+
+        FakeEmbedder はハッシュベースの決定的疑似ベクトルなので、コサイン
+        類似度を意図的に操作するのは難しい。そこで実 build_engine + 実
+        db/store(tmp_path)を使い、FTS の BM25 が実際に効くことを検証する。
+        """
+        settings = Settings(
+            memories_dir=tmp_path / "memories",
+            data_dir=tmp_path / "data",
+            candidate_k=20,
+        )
+        engine = build_engine(settings, embedder=FakeEmbedder(dim=256))
+        try:
+            # 希少トークン(固有 ID 的な文字列)を含む記憶
+            rare_token = "ZXQ9981-エラーコード"
+            target = engine.remember(
+                f"{rare_token} が出た場合はキャッシュを全消去してから再起動する",
+                type="knowledge", importance=5, now=NOW,
+            )
+            # 語彙的には無関係だが多数投入して候補プールを厚くする
+            topics = ["予算配分", "採用面接", "週次定例", "顧客訪問",
+                      "障害対応訓練", "棚卸し作業", "契約更新", "備品発注"]
+            for i, topic in enumerate(topics):
+                engine.remember(
+                    f"メモ{i}: {topic}に関する記録。詳細は別紙参照。",
+                    type="knowledge", importance=5, now=NOW,
+                )
+
+            result = engine.recall(rare_token, limit=5, now=NOW,
+                                   record_hits=False)
+            hit_ids = [h["id"] for h in result["hits"]]
+            assert hit_ids[0] == target["id"], (
+                "希少トークンの完全一致は BM25 由来の高 relevance で首位に"
+                "来るべき(ベクトル類似度の順位写像に頼っていた旧実装は"
+                "これを満たせなかった)"
+            )
+        finally:
+            engine.db.close()
+
+
+# ---------------------------------------------------------------------------
+# forget: ゴミ箱移動後に db.set_path が呼ばれ、実ファイルが _trash/ に移ること
+# ---------------------------------------------------------------------------
+
+class TestForgetTrashPath:
+    def test_forget_updates_db_path_to_trash(self, tmp_path):
+        """forget 後、db.get_memory(id)["path"] が _trash/ 配下を指し、
+        そのパスに実ファイルが存在すること(実 store/db を使う統合テスト)。"""
+        settings = Settings(
+            memories_dir=tmp_path / "memories",
+            data_dir=tmp_path / "data",
+            candidate_k=20,
+        )
+        engine = build_engine(settings, embedder=FakeEmbedder(dim=64))
+        try:
+            created = engine.remember(
+                "忘れられる運命の記憶", type="knowledge", importance=3, now=NOW,
+            )
+            mem_id = created["id"]
+
+            # forget 前: パスは _trash 配下ではない
+            before = engine.db.get_memory(mem_id)
+            assert "_trash" not in before["path"]
+
+            result = engine.forget(mem_id)
+            assert result["status"] == "forgotten"
+
+            after = engine.db.get_memory(mem_id)
+            assert after is not None
+            after_path = Path(after["path"])
+            assert "_trash" in after_path.parts
+            assert after_path.is_file(), "db.set_path 後の新パスに実ファイルが存在すること"
+        finally:
+            engine.db.close()

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -254,14 +255,8 @@ class MemoryEngine:
         # RRF で統合
         merged = dynamics.rrf_merge([vec_ids, kw_ids], k=s.rrf_k)
 
-        # 候補の relevance: ベクトル類似度。FTS のみヒットには候補中の最小類似度を割当
-        min_vec_sim = min(vec_sim.values()) if vec_sim else 0.0
-        relevances: dict[str, float] = {}
-        for id_ in merged:
-            if id_ in vec_sim:
-                relevances[id_] = vec_sim[id_]
-            else:
-                relevances[id_] = min_vec_sim
+        # 候補の relevance: ベクトル類似度 + FTS の BM25 順位写像(_hybrid_relevances)
+        relevances = _hybrid_relevances(vec_results, kw_results)
 
         # 活性度を計算して最終スコアで再ランク
         candidate_ids = list(merged.keys())
@@ -359,6 +354,8 @@ class MemoryEngine:
 
         vec_sim: dict[str, float] = {id_: sim for id_, sim in vec_results}
         min_vec_sim = min(vec_sim.values()) if vec_sim else 0.0
+        # 直接候補の relevance(FTS ヒットの BM25 順位写像込み)
+        relevances = _hybrid_relevances(vec_results, kw_results)
 
         vec_ids = [id_ for id_, _ in vec_results]
         kw_ids = [id_ for id_, _ in kw_results]
@@ -429,7 +426,8 @@ class MemoryEngine:
             d = dynamics.decay_rate(imp)
             act = dynamics.activation_norm(events_map.get(id_, []), now, d,
                                            min_elapsed=s.min_elapsed_seconds)
-            rel = vec_sim.get(id_, min_vec_sim)
+            # 直接候補は hybrid relevance、連想経由は実コサイン(vec_sim に格納済み)
+            rel = relevances.get(id_, vec_sim.get(id_, min_vec_sim))
             if via == "associative":
                 # 連想経由ノードはクエリとの直接類似が低いからこそリンクで
                 # 辿られている。強いリンクで繋がっていること自体が関連性の
@@ -782,7 +780,11 @@ class MemoryEngine:
 
         try:
             record = self.store.read(Path(mem["path"]))
-            self.store.move_to_trash(record)
+            updated = self.store.move_to_trash(record)
+            # DB の path を移動先へ追随させる。旧パスのままだと以後の
+            # store.read がこの記憶で失敗し、reindex まで自己修復されない
+            if updated.path is not None:
+                self.db.set_path(id, str(updated.path))
         except Exception:
             pass
 
@@ -1024,6 +1026,34 @@ class MemoryEngine:
             "valid": valid_count,
             "reindex": reindex_result,
         }
+
+
+def _hybrid_relevances(
+    vec_results: list[tuple[str, float]],
+    kw_results: list[tuple[str, float]],
+) -> dict[str, float]:
+    """RRF 候補の relevance を組み立てる(ハイブリッド検索の要)。
+
+    ベクトルでヒットした候補はコサイン類似度、FTS でヒットした候補は BM25 を
+    (0,1) の絶対スケールへ写した字句関連度とし、両方あるものは大きい方を採る。
+
+    かつては FTS のみのヒットに一律 min_vec_sim(ベクトル候補中の最小類似度)を
+    与えていたが、それだと ID・ファイルパス・固有名詞の完全一致(ベクトルが
+    苦手で FTS が得意な領域)が候補中最下位に沈み、表に出られなかった。
+    さらに Ruri のコサインは 0.8〜0.87 に圧縮されがちで、ベクトル値域への
+    順位写像では字句一致の決定的な証拠を表現しきれない(実データで確認)。
+
+    BM25 は語の希少性(IDF)を符号化しているのでそれを絶対スケールに使う:
+        lex = 1 - exp(bm25_sqlite)      # sqlite の bm25() は負値・小さいほど良い
+    希少トークンの完全一致(bm25 ≒ -6)は 0.997、ありふれた語の一致
+    (bm25 ≒ -0.5)は 0.39 になり、決定的な字句一致だけがコサインの
+    天井(〜0.87)を越えて浮上する。一般語のヒットはベクトル候補に劣後する。
+    """
+    relevances = {id_: sim for id_, sim in vec_results}
+    for id_, bm25 in kw_results:
+        lex = 1.0 - math.exp(bm25) if bm25 < 0 else 0.0
+        relevances[id_] = max(relevances.get(id_, 0.0), lex)
+    return relevances
 
 
 def build_engine(settings: Settings | None = None, *, embedder: Embedder | None = None

@@ -23,6 +23,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from . import perf
 from .config import resolve_room
 from .engine import MemoryEngine, build_engine
 
@@ -47,6 +48,16 @@ def _get_engine() -> MemoryEngine:
             _engine = build_engine()
             _run_startup_index_check(_engine)
     return _engine
+
+
+def _timed(name: str):
+    """perf.timed への薄い委譲(settings は _get_engine 経由で取得しキャッシュ)。
+
+    FastMCP はツール関数のシグネチャを検査してスキーマを作るため、ツール関数
+    自体をデコレータで包むのではなく、各ツールの本体内で `with _timed(...):`
+    のように使う(関数のシグネチャ・docstring には一切触れない)。
+    """
+    return perf.timed(_get_engine().settings, "tool", name)
 
 
 def _run_startup_index_check(engine: MemoryEngine) -> None:
@@ -110,15 +121,16 @@ def remember(
     普遍的な記憶だけ room="common" を明示する。
     """
     engine = _get_engine()
-    return engine.remember(
-        content=content,
-        type=type,
-        importance=importance,
-        tags=tags,
-        source=source,
-        related_ids=related_ids,
-        room=room if room is not None else _default_room(),
-    )
+    with _timed("remember"):
+        return engine.remember(
+            content=content,
+            type=type,
+            importance=importance,
+            tags=tags,
+            source=source,
+            related_ids=related_ids,
+            room=room if room is not None else _default_room(),
+        )
 
 
 @mcp.tool()
@@ -141,14 +153,15 @@ def recall(
     横断検索できるが、仕事/個人の分離を壊さないよう必要時のみ使うこと。
     """
     engine = _get_engine()
-    return engine.recall(
-        query=query,
-        mode=mode,
-        limit=limit,
-        type=type,
-        record_hits=record_hits,
-        room=room if room is not None else _default_room(),
-    )
+    with _timed("recall"):
+        return engine.recall(
+            query=query,
+            mode=mode,
+            limit=limit,
+            type=type,
+            record_hits=record_hits,
+            room=room if room is not None else _default_room(),
+        )
 
 
 @mcp.tool()
@@ -164,7 +177,8 @@ def reinforce(
     strength は 0.1〜3.0 で強化の強さを指定できる。
     """
     engine = _get_engine()
-    return engine.reinforce(ids=ids, strength=strength)
+    with _timed("reinforce"):
+        return engine.reinforce(ids=ids, strength=strength)
 
 
 @mcp.tool()
@@ -180,12 +194,13 @@ def correct(
     誤りを明示的に記録することで、同じ間違いの繰り返しを防ぐ(ハイパーコレクション効果)。
     """
     engine = _get_engine()
-    return engine.correct(
-        id=id,
-        corrected_content=corrected_content,
-        reason=reason,
-        source=source,
-    )
+    with _timed("correct"):
+        return engine.correct(
+            id=id,
+            corrected_content=corrected_content,
+            reason=reason,
+            source=source,
+        )
 
 
 @mcp.tool()
@@ -196,7 +211,8 @@ def link(src: str, dst: str) -> dict:
     deep recall でリンクを辿って連想的に想起できるようになる。
     """
     engine = _get_engine()
-    return engine.link(src=src, dst=dst)
+    with _timed("link"):
+        return engine.link(src=src, dst=dst)
 
 
 @mcp.tool()
@@ -208,7 +224,8 @@ def forget(id: str) -> dict:
     誤りを訂正したい場合は forget ではなく correct を使うこと。
     """
     engine = _get_engine()
-    return engine.forget(id=id)
+    with _timed("forget"):
+        return engine.forget(id=id)
 
 
 @mcp.tool()
@@ -220,7 +237,8 @@ def consolidation_candidates() -> dict:
     LLM が要約を生成し、mark_consolidated で統合を完了する。
     """
     engine = _get_engine()
-    return engine.consolidation_candidates()
+    with _timed("consolidation_candidates"):
+        return engine.consolidation_candidates()
 
 
 @mcp.tool()
@@ -232,10 +250,11 @@ def mark_consolidated(episode_ids: list[str], new_memory_id: str) -> dict:
     元の episode は cold(長期保存)に降格し、derived_from リンクで繋がれる。
     """
     engine = _get_engine()
-    return engine.mark_consolidated(
-        episode_ids=episode_ids,
-        new_memory_id=new_memory_id,
-    )
+    with _timed("mark_consolidated"):
+        return engine.mark_consolidated(
+            episode_ids=episode_ids,
+            new_memory_id=new_memory_id,
+        )
 
 
 @mcp.tool()
@@ -246,7 +265,8 @@ def reindex() -> dict:
     差異のある記憶だけ再埋め込みするため、全件再構築より高速。
     """
     engine = _get_engine()
-    return engine.reindex()
+    with _timed("reindex"):
+        return engine.reindex()
 
 
 @mcp.tool()
@@ -256,19 +276,36 @@ def stats() -> dict:
     記憶の件数(type別・tier別)、アクセスイベント数、リンク数などを確認できる。
     """
     engine = _get_engine()
-    return engine.stats()
+    with _timed("stats"):
+        return engine.stats()
 
 
 def _preload() -> None:
-    """埋め込みモデルを先読みする(失敗しても起動は続行)。"""
+    """埋め込みモデルを先読みする(失敗しても起動は続行)。preload 全体の所要時間を計測する。"""
     import sys
+    import time
 
+    # settings は build_engine 前でも config だけから取れるので、エンジン構築
+    # 自体が失敗しても計測できるようにここで先に用意する
+    from .config import get_settings
+
+    settings = get_settings()
+    start = time.perf_counter()
+    ok = True
     try:
         engine = _get_engine()
         engine.embedder.embed_query("ウォームアップ")
         print("engram: engine preloaded", file=sys.stderr)
     except Exception as e:  # 失敗しても起動は続け、初回ツール呼び出しで再試行
+        ok = False
         print(f"engram: preload failed, will retry lazily: {e}", file=sys.stderr)
+    finally:
+        if settings.perf_log:
+            ms = (time.perf_counter() - start) * 1000.0
+            perf.append_perf(
+                settings,
+                {"ts": time.time(), "kind": "preload", "name": "preload", "ms": ms, "ok": ok},
+            )
 
 
 def main() -> None:

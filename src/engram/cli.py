@@ -10,6 +10,7 @@ argparse のサブコマンドで engine を直接叩く。出力は人間可読
     engram forget ID / engram link SRC DST
     engram stats / engram reindex
     engram consolidation-candidates
+    engram mark-consolidated NEW_ID --episodes ID1,ID2,...  統合完了を記録する
     engram surface "発話" [--room X]     自発的想起の手動確認(何も書き込まない)
     engram hook session-end|user-prompt  エージェントのフック用入口(stdin JSON)
     engram export-onnx [--force]         埋め込みモデルの ONNX 化(起動高速化)
@@ -247,6 +248,20 @@ def main() -> None:
         help="統合候補の episode クラスタを表示する",
     )
 
+    # --- mark-consolidated ---
+    p_mark_consolidated = subparsers.add_parser(
+        "mark-consolidated",
+        help="統合完了を記録する(episode→new_memory_id のリンク+cold降格)",
+    )
+    p_mark_consolidated.add_argument(
+        "new_memory_id", help="統合先(新規作成済み)の記憶 ID"
+    )
+    p_mark_consolidated.add_argument(
+        "--episodes",
+        required=True,
+        help="統合元 episode ID のカンマ区切り",
+    )
+
     # --- setup ---
     p_setup = subparsers.add_parser("setup", help="セットアップウィザードを実行する")
     p_setup.add_argument(
@@ -474,6 +489,11 @@ def main() -> None:
                 for id_, content in zip(cluster["ids"], cluster.get("contents", [])):
                     preview = content.replace("\n", " ")[:60] if content else "(内容なし)"
                     print(f"  [{id_}] {preview}")
+
+    elif args.command == "mark-consolidated":
+        episode_ids = [e.strip() for e in args.episodes.split(",") if e.strip()]
+        result = engine.mark_consolidated(episode_ids, args.new_memory_id)
+        _print_result(result, as_json=args.as_json)
 
 
 if __name__ == "__main__":
