@@ -290,6 +290,14 @@ minimum vector similarity among the candidate pool, which buried exact-match
 results at the bottom of the ranking even when they were the obviously
 correct answer.
 
+Short queries are now covered too (v0.7.1). The FTS5 trigram tokenizer cannot
+index terms shorter than 3 characters, so two-character Japanese words (like
+会議) used to be invisible to lexical search, and mixed queries containing any
+short token returned zero rows because of the implicit AND. The MATCH
+expression is now built from tokens of 3+ characters only, and when no such
+token exists the search falls back to LIKE substring matching with an
+IDF-based pseudo score (`lex = N/(N+df)`: rarer terms score higher).
+
 ### Memory types
 
 | type | Contents |

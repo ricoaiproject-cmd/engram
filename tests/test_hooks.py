@@ -453,3 +453,44 @@ def test_config_toml_roundtrip_with_room_paths(tmp_path):
     data = read_config_toml(cfg)
     assert data["surface_mode"] == "active"
     assert data["room_paths"]["C:/Users/me/work"] == "work"
+
+
+# ---------------------------------------------------------------------------
+# mark_consolidated ツールが促し用の状態を即時更新する(server 経由)
+# ---------------------------------------------------------------------------
+
+
+class TestMarkConsolidatedRefreshesState:
+    def test_state_refreshed_after_mark_consolidated(self, engram_home, monkeypatch):
+        import engram.server as server
+        from engram.hooks import (
+            _read_consolidation_state,
+            _write_consolidation_state,
+        )
+
+        settings = get_settings()
+
+        class _FakeEngine:
+            def __init__(self):
+                self.settings = settings
+
+            def mark_consolidated(self, episode_ids, new_memory_id):
+                return {
+                    "consolidated": episode_ids,
+                    "new_memory_id": new_memory_id,
+                    "status": "ok",
+                }
+
+            def consolidation_candidates(self):
+                # 統合後は1クラスタだけ残っている想定
+                return {"clusters": [{"ids": ["a", "b"], "contents": ["x", "y"]}]}
+
+        monkeypatch.setattr(server, "_engine", _FakeEngine())
+        # 事前状態: 統合前の古いクラスタ数
+        _write_consolidation_state(settings, {"clusters": 5, "checked_at": 0.0})
+
+        result = server.mark_consolidated(["e1", "e2"], "new1")
+
+        assert result["status"] == "ok"
+        state = _read_consolidation_state(settings)
+        assert state["clusters"] == 1  # 5 のまま放置されない

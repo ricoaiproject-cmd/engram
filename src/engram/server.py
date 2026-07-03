@@ -116,7 +116,7 @@ def remember(
 
     タスク中に重要な情報(事実・好み・プロジェクト状況・出来事)を発見したとき呼ぶ。
     importance は 1〜10 で文脈の重要度を自己採点する。
-    既存の類似記憶(cos ≥ 0.92)がある場合は重複強化して返す。
+    既存の類似記憶(cos が dup_threshold=0.95 以上)がある場合は重複強化して返す。
     room は通常指定不要(作業ディレクトリから自動判定)。どの文脈でも使う
     普遍的な記憶だけ room="common" を明示する。
     """
@@ -251,10 +251,24 @@ def mark_consolidated(episode_ids: list[str], new_memory_id: str) -> dict:
     """
     engine = _get_engine()
     with _timed("mark_consolidated"):
-        return engine.mark_consolidated(
+        result = engine.mark_consolidated(
             episode_ids=episode_ids,
             new_memory_id=new_memory_id,
         )
+    # 統合完了でクラスタ数が変わるので促し用の状態を即時更新する。
+    # 怠ると次の session-end まで古いクラスタ数のまま促し続ける
+    try:
+        import time
+
+        from .hooks import _write_consolidation_state
+
+        n = len(engine.consolidation_candidates().get("clusters", []))
+        _write_consolidation_state(
+            engine.settings, {"clusters": n, "checked_at": time.time()}
+        )
+    except Exception:
+        pass
+    return result
 
 
 @mcp.tool()

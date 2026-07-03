@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 
@@ -460,6 +461,38 @@ class IndexDB:
 
         return results
 
+    def _allowed_ids(
+        self,
+        candidate_ids: list[str],
+        tiers: list[str] | None,
+        types: list[str] | None,
+        rooms: list[str] | None,
+    ) -> set[str] | None:
+        """tier/type/room フィルタを通る id 集合を返す。フィルタなしなら None。"""
+        if not (tiers or types or rooms):
+            return None
+        placeholders = ",".join("?" * len(candidate_ids))
+        filter_params: list = list(candidate_ids)
+        filter_sql = (
+            f"SELECT id FROM memories WHERE id IN ({placeholders})"
+        )
+        if tiers:
+            tier_ph = ",".join("?" * len(tiers))
+            filter_sql += f" AND tier IN ({tier_ph})"
+            filter_params.extend(tiers)
+        if types:
+            type_ph = ",".join("?" * len(types))
+            filter_sql += f" AND type IN ({type_ph})"
+            filter_params.extend(types)
+        if rooms:
+            room_ph = ",".join("?" * len(rooms))
+            filter_sql += f" AND room IN ({room_ph})"
+            filter_params.extend(rooms)
+        return {
+            r["id"]
+            for r in self._conn.execute(filter_sql, filter_params).fetchall()
+        }
+
     def keyword_search(
         self,
         query: str,
@@ -471,17 +504,25 @@ class IndexDB:
     ) -> list[tuple[str, float]]:
         """FTS5(trigram) BM25。(id, スコア) をランク順で k 件。
 
-        3文字未満のクエリや FTS 構文エラーは空リストを返す(落とさない)。
+        trigram は3文字未満の語をトークン化できない。短いトークンを MATCH に
+        混ぜると(トークンが生成されず)AND 条件が全体を0件にするため、3文字
+        以上のトークンだけで MATCH 式を組む。3文字以上のトークンが1つも無い
+        短いクエリ(日本語の2文字語など)は LIKE 部分一致へフォールバックし、
+        IDF ベースの擬似スコアを返す(_like_search)。
+        FTS 構文エラーは空リストを返す(落とさない)。
         """
-        # trigram requires at least 3 chars in each term
         stripped = query.strip()
-        if len(stripped) < 3:
+        if not stripped:
             return []
 
+        tokens = [t for t in stripped.split() if len(t) >= 3]
+        if not tokens:
+            return self._like_search(
+                stripped.split(), k, tiers=tiers, types=types, rooms=rooms
+            )
+
         # Escape and quote each term for FTS5
-        # Split on whitespace, wrap each token in double-quotes
         # (internal double-quotes → doubled)
-        tokens = stripped.split()
         fts_query = " ".join(
             '"' + tok.replace('"', '""') + '"' for tok in tokens
         )
@@ -501,34 +542,9 @@ class IndexDB:
         if not rows:
             return []
 
-        # Apply tier/type/room filters if needed
-        if tiers or types or rooms:
-            candidate_ids = [r["memory_id"] for r in rows]
-            placeholders = ",".join("?" * len(candidate_ids))
-            filter_params: list = list(candidate_ids)
-            filter_sql = (
-                f"SELECT id FROM memories WHERE id IN ({placeholders})"
-            )
-            if tiers:
-                tier_ph = ",".join("?" * len(tiers))
-                filter_sql += f" AND tier IN ({tier_ph})"
-                filter_params.extend(tiers)
-            if types:
-                type_ph = ",".join("?" * len(types))
-                filter_sql += f" AND type IN ({type_ph})"
-                filter_params.extend(types)
-            if rooms:
-                room_ph = ",".join("?" * len(rooms))
-                filter_sql += f" AND room IN ({room_ph})"
-                filter_params.extend(rooms)
-            allowed = {
-                r["id"]
-                for r in self._conn.execute(
-                    filter_sql, filter_params
-                ).fetchall()
-            }
-        else:
-            allowed = None
+        allowed = self._allowed_ids(
+            [r["memory_id"] for r in rows], tiers, types, rooms
+        )
 
         results: list[tuple[str, float]] = []
         for row in rows:
@@ -536,6 +552,89 @@ class IndexDB:
             if allowed is not None and mid not in allowed:
                 continue
             results.append((mid, row["score"]))
+            if len(results) >= k:
+                break
+
+        return results
+
+    def _like_search(
+        self,
+        tokens: list[str],
+        k: int,
+        *,
+        tiers: list[str] | None = None,
+        types: list[str] | None = None,
+        rooms: list[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """trigram に乗らない短いトークン用の LIKE 部分一致(AND)。
+
+        スコアは BM25 の代わりに IDF のみの擬似値:
+            pseudo_bm25 = -ln(1 + N/df)   (N=全件数, df=マッチ件数)
+        engine 側の写像 lex = 1 - exp(bm25) と合成すると lex = N/(N+df) となり、
+        希少語のヒットほど relevance が高い(BM25 経路と意味論が一貫する)。
+        並び順はトークン出現回数の合計 desc(同点は insertion order)。
+        """
+        if not tokens:
+            return []
+
+        # % _ \ をエスケープした部分一致条件(トークンの AND)
+        def esc(t: str) -> str:
+            return (
+                t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+
+        where_sql = " AND ".join(
+            "f.content LIKE ? ESCAPE '\\'" for _ in tokens
+        )
+        like_params = [f"%{esc(t)}%" for t in tokens]
+
+        try:
+            df_row = self._conn.execute(
+                f"SELECT COUNT(*) AS df FROM fts_memories f WHERE {where_sql}",
+                like_params,
+            ).fetchone()
+            df = int(df_row["df"])
+            if df == 0:
+                return []
+            n_total = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM fts_memories"
+                ).fetchone()["n"]
+            )
+
+            # 出現回数の合計(REPLACE トリック)で並べる
+            occ_terms = []
+            occ_params: list = []
+            for t in tokens:
+                occ_terms.append(
+                    "(LENGTH(f.content) - LENGTH(REPLACE(f.content, ?, '')))"
+                    " / LENGTH(?)"
+                )
+                occ_params.extend([t, t])
+            occ_sql = " + ".join(occ_terms)
+
+            rows = self._conn.execute(
+                f"""SELECT f.memory_id FROM fts_memories f
+                    WHERE {where_sql}
+                    ORDER BY ({occ_sql}) DESC
+                    LIMIT ?""",
+                like_params + occ_params
+                + [k * 4 if (tiers or types or rooms) else k],
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+        pseudo = -math.log(1.0 + n_total / df)
+        allowed = self._allowed_ids(
+            [r["memory_id"] for r in rows], tiers, types, rooms
+        )
+
+        results: list[tuple[str, float]] = []
+        for row in rows:
+            mid = row["memory_id"]
+            if allowed is not None and mid not in allowed:
+                continue
+            results.append((mid, pseudo))
             if len(results) >= k:
                 break
 

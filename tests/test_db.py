@@ -185,17 +185,72 @@ def test_keyword_search_japanese(db, embedder):
     assert results[0][0] == "jp1"
 
 
-def test_keyword_search_too_short_returns_empty(db, embedder):
+def test_keyword_search_short_query_no_match_returns_empty(db, embedder):
     _upsert(db, embedder, "x1", "test content here")
-    # 2-char query → empty
-    results = db.keyword_search("ab", k=5)
-    assert results == []
+    # 3文字未満は LIKE フォールバック。部分一致しなければ空
+    assert db.keyword_search("ab", k=5) == []
+    assert db.keyword_search("a", k=5) == []
 
 
-def test_keyword_search_single_char_returns_empty(db, embedder):
-    _upsert(db, embedder, "x1", "test content here")
-    results = db.keyword_search("a", k=5)
-    assert results == []
+# ---------------------------------------------------------------------------
+# keyword_search: 短クエリの LIKE フォールバック(trigram 非対応領域)
+# ---------------------------------------------------------------------------
+
+def test_keyword_search_short_query_like_fallback(db, embedder):
+    _upsert(db, embedder, "m1", "毎週火曜の会議の議事録")
+    _upsert(db, embedder, "m2", "全く関係ない内容のメモ")
+    results = db.keyword_search("会議", k=5)
+    assert [r[0] for r in results] == ["m1"]
+    # 擬似スコアも BM25 と同じ「負値・小さいほど良い」向き
+    assert results[0][1] < 0
+
+
+def test_keyword_search_short_query_rare_scores_better_than_common(db, embedder):
+    _upsert(db, embedder, "r1", "予算の稟議書")
+    for i in range(5):
+        _upsert(db, embedder, f"c{i}", f"会議メモその{i}")
+    rare = db.keyword_search("稟議", k=5)
+    common = db.keyword_search("会議", k=5)
+    # 希少語(df=1/6)はありふれた語(df=5/6)よりスコアが良い(より負)
+    assert rare[0][1] < common[0][1]
+
+
+def test_keyword_search_short_query_orders_by_occurrences(db, embedder):
+    _upsert(db, embedder, "many", "会議の前に会議室で会議の準備")
+    _upsert(db, embedder, "once", "会議は火曜です")
+    results = db.keyword_search("会議", k=5)
+    assert [r[0] for r in results] == ["many", "once"]
+
+
+def test_keyword_search_short_query_respects_tier_filter(db, embedder):
+    _upsert(db, embedder, "h1", "会議の記録", tier="hot")
+    _upsert(db, embedder, "t1", "会議の記録その二", tier="trash")
+    results = db.keyword_search("会議", k=5, tiers=["hot"])
+    assert [r[0] for r in results] == ["h1"]
+
+
+def test_keyword_search_short_query_multi_token_and(db, embedder):
+    _upsert(db, embedder, "both", "AB 棟の会議は火曜")
+    _upsert(db, embedder, "one", "CD 棟の会議は水曜")
+    # 全トークンが3文字未満 → LIKE の AND
+    results = db.keyword_search("AB 会議", k=5)
+    assert [r[0] for r in results] == ["both"]
+
+
+def test_keyword_search_mixed_query_drops_short_tokens(db, embedder):
+    _upsert(db, embedder, "room", "第3会議室の予約方法について")
+    # 旧実装では 2文字トークン "AB" が MATCH 全体を0件にしていた。
+    # 新実装は3文字以上のトークン(会議室)だけで検索する
+    results = db.keyword_search("AB 会議室", k=5)
+    assert [r[0] for r in results] == ["room"]
+
+
+def test_keyword_search_short_query_escapes_like_wildcards(db, embedder):
+    _upsert(db, embedder, "pct", "進捗は95%です")
+    _upsert(db, embedder, "other", "進捗は九割五分です")
+    # "%" が LIKE のワイルドカードとして解釈されないこと
+    results = db.keyword_search("5%", k=5)
+    assert [r[0] for r in results] == ["pct"]
 
 
 def test_keyword_search_fts_error_returns_empty(db, embedder):
