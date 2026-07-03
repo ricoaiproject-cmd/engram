@@ -1,9 +1,12 @@
 [project]
 name = "engram"
-version = "0.5.1"
+version = "0.6.0"
 description = "Human-like memory MCP server for AI agents: activation decay, associative recall, error-driven encoding"
 requires-python = ">=3.12"
-# 配布時のつまずきを減らすため、埋め込みモデルの実行系も既定の依存に含める
+# 配布時のつまずきを減らすため、埋め込みモデルの実行系も既定の依存に含める。
+# ランタイムの既定は ONNX(onnxruntime + tokenizers、起動1〜2秒)。
+# sentence-transformers(torch)は ONNX 未生成時のフォールバック +
+# export-onnx のパリティ基準として残している(将来 extras へ分離予定)。
 dependencies = [
     "mcp>=1.2",
     "sqlite-vec>=0.1.6",
@@ -11,6 +14,8 @@ dependencies = [
     "python-frontmatter>=1.1",
     "python-ulid>=2.7",
     "sentence-transformers>=3.0",
+    "onnxruntime>=1.20",
+    "tokenizers>=0.20",
 ]
 
 [project.optional-dependencies]

@@ -590,3 +590,87 @@ class TestSetupMainAgentsFilter:
         # codex は書かれていないか、engram セクションがない
         if codex_cfg.exists():
             assert "[mcp_servers.engram]" not in codex_cfg.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# doctor の診断ヘルパー(埋め込み実行系・インストール健全性)
+
+
+class TestCheckEmbedBackend:
+    def _settings(self, tmp_path, **overrides):
+        from engram.config import Settings
+
+        return Settings(data_dir=tmp_path, **overrides)
+
+    def _write_onnx_model(self, tmp_path, meta: dict | str) -> Path:
+        from engram.config import Settings
+
+        onnx_dir = Settings(data_dir=tmp_path).onnx_model_dir
+        onnx_dir.mkdir(parents=True)
+        (onnx_dir / "model.onnx").touch()
+        (onnx_dir / "tokenizer.json").touch()
+        text = meta if isinstance(meta, str) else json.dumps(meta)
+        (onnx_dir / "meta.json").write_text(text, encoding="utf-8")
+        return onnx_dir
+
+    def test_onnx_present_reports_ok_with_dim_and_parity(self, tmp_path):
+        from engram.setup import check_embed_backend
+
+        self._write_onnx_model(
+            tmp_path,
+            {"dim": 512, "parity": {"min_cosine": 0.999999}},
+        )
+        status, detail = check_embed_backend(self._settings(tmp_path))
+        assert status == "[OK]"
+        assert "dim=512" in detail
+        assert "parity=0.999999" in detail
+
+    def test_onnx_missing_suggests_export(self, tmp_path):
+        from engram.setup import check_embed_backend
+
+        status, detail = check_embed_backend(self._settings(tmp_path))
+        assert status == "[--]"
+        assert "export-onnx" in detail
+
+    def test_torch_forced_is_reported(self, tmp_path):
+        from engram.setup import check_embed_backend
+
+        status, detail = check_embed_backend(
+            self._settings(tmp_path, embed_backend="torch")
+        )
+        assert status == "[--]"
+        assert "torch" in detail
+
+    def test_broken_meta_is_ng(self, tmp_path):
+        from engram.setup import check_embed_backend
+
+        self._write_onnx_model(tmp_path, "{not json")
+        status, detail = check_embed_backend(self._settings(tmp_path))
+        assert status == "[NG]"
+
+
+class TestFindInstallRemnants:
+    def test_clean_site_packages_is_empty(self, tmp_path):
+        from engram.setup import find_install_remnants
+
+        (tmp_path / "engram").mkdir()
+        (tmp_path / "numpy").mkdir()
+        assert find_install_remnants(tmp_path) == []
+
+    def test_detects_pip_rename_remnants(self, tmp_path):
+        from engram.setup import find_install_remnants
+
+        (tmp_path / "~ngram").mkdir()
+        (tmp_path / "~ngram-0.5.0.dist-info").mkdir()
+        (tmp_path / "~-gram").mkdir()
+        (tmp_path / "engram").mkdir()  # 正常な方は引っかからない
+        found = find_install_remnants(tmp_path)
+        assert "~ngram" in found
+        assert "~ngram-0.5.0.dist-info" in found
+        assert "~-gram" in found
+        assert "engram" not in found
+
+    def test_missing_dir_is_empty(self, tmp_path):
+        from engram.setup import find_install_remnants
+
+        assert find_install_remnants(tmp_path / "nope") == []

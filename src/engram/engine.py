@@ -1029,22 +1029,19 @@ class MemoryEngine:
 def build_engine(settings: Settings | None = None, *, embedder: Embedder | None = None
                  ) -> MemoryEngine:
     """既定構成でエンジンを組み立てるファクトリ(server / cli から使う)。
-    embedder 未指定なら RuriEmbedder(settings.embed_model)。"""
+    embedder 未指定なら settings.embed_backend に従って選択(embedder.make_embedder)。"""
     if settings is None:
         settings = get_settings()
 
     if embedder is None:
-        from .embedder import RuriEmbedder
-        embedder = RuriEmbedder(
-            model_name=settings.embed_model,
-            query_prefix=settings.query_prefix,
-            doc_prefix=settings.doc_prefix,
-        )
+        from .embedder import make_embedder
+        embedder = make_embedder(settings)
 
     store = MarkdownStore(settings.memories_dir)
     # 次元は必ず実モデルから取得する(推定が外れると DB のベクトル表が
-    # 誤った次元で固定され、以後の全埋め込みが壊れる)。RuriEmbedder の
-    # 初回ロードはここで走るが、stdio サーバーは常駐なので一度きり。
+    # 誤った次元で固定され、以後の全埋め込みが壊れる)。ONNX 経路は meta.json
+    # から即答するのでここでのモデルロードは走らない。torch 経路(RuriEmbedder)
+    # は初回ロードがここで走るが、stdio サーバーは常駐なので一度きり。
     db = IndexDB(settings.db_path, embedder.dim)
 
     return MemoryEngine(settings=settings, store=store, db=db, embedder=embedder)

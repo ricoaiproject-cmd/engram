@@ -12,6 +12,7 @@ argparse のサブコマンドで engine を直接叩く。出力は人間可読
     engram consolidation-candidates
     engram surface "発話" [--room X]     自発的想起の手動確認(何も書き込まない)
     engram hook session-end|user-prompt  エージェントのフック用入口(stdin JSON)
+    engram export-onnx [--force]         埋め込みモデルの ONNX 化(起動高速化)
 
 --fake-embedder フラグで FakeEmbedder を使う(モデル未導入環境での試験用)。
 """
@@ -268,6 +269,17 @@ def main() -> None:
     # --- doctor ---
     subparsers.add_parser("doctor", help="環境診断を表示する")
 
+    # --- export-onnx ---
+    p_export = subparsers.add_parser(
+        "export-onnx",
+        help="埋め込みモデルを ONNX 化して起動を高速化する(一度だけ実行)",
+    )
+    p_export.add_argument(
+        "--force",
+        action="store_true",
+        help="既存の ONNX モデルを上書きする",
+    )
+
     # --- surface ---
     p_surface = subparsers.add_parser(
         "surface",
@@ -317,6 +329,26 @@ def main() -> None:
     if args.command == "doctor":
         from .setup import doctor_main
         doctor_main()
+        return
+
+    if args.command == "export-onnx":
+        from .config import get_settings
+        from .onnx_export import export_onnx
+
+        try:
+            report = export_onnx(get_settings(), force=args.force)
+        except (ImportError, FileExistsError, RuntimeError) as e:
+            print(f"エラー: {e}", file=sys.stderr)
+            sys.exit(1)
+        if args.as_json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(f"ONNX モデルを生成しました: {report['target']}")
+            print(f"  モデル: {report['model']} (dim={report['dim']}, "
+                  f"{report['onnx_size_mb']} MB)")
+            print(f"  パリティ: min cosine = {report['min_cosine']:.6f} "
+                  f"(torch 経路と一致)")
+            print("  以後の起動は ONNX 経路(embed_backend=auto)で軽くなります")
         return
 
     # hook / surface はエンジン構築なし(高速経路)で動く

@@ -810,6 +810,52 @@ def setup_main(
 # doctor コマンド本体
 # ---------------------------------------------------------------------------
 
+def check_embed_backend(settings) -> tuple[str, str]:
+    """埋め込み実行系の診断。(status, detail) を返す(doctor の行に載せる)。
+
+    ONNX モデルが生成済みなら [OK] と dim・パリティを、未生成なら [--] と
+    export-onnx の案内を返す。embed_backend=torch の場合はその旨を返す。
+    """
+    backend = getattr(settings, "embed_backend", "auto")
+    onnx_dir = settings.onnx_model_dir
+    meta_path = onnx_dir / "meta.json"
+
+    if backend == "torch":
+        return "[--]", "torch を強制中(起動が重い。auto に戻すと ONNX を使う)"
+
+    if meta_path.is_file():
+        try:
+            with meta_path.open(encoding="utf-8") as f:
+                meta = json.load(f)
+            parity = meta.get("parity", {}).get("min_cosine")
+            parity_str = f", parity={parity:.6f}" if parity is not None else ""
+            return "[OK]", (
+                f"ONNX (dim={meta.get('dim')}{parity_str})  {onnx_dir}"
+            )
+        except Exception:
+            return "[NG]", f"meta.json が壊れています: {meta_path}"
+    return "[--]", (
+        "ONNX 未生成(torch フォールバックで起動が重い)。"
+        "`engram export-onnx` を実行してください"
+    )
+
+
+def find_install_remnants(purelib: Path | None = None) -> list[str]:
+    """site-packages に残った pip 再インストール失敗の残骸を探す。
+
+    pip は更新時にパッケージを「~ngram」等へ一時リネームする。その最中に
+    プロセスが落ちる(実例: 実行中の engram がファイルをロックしていた)と
+    残骸だけが残り、`import engram` が不能になる。対処: engram プロセスを
+    止める → 残骸を削除 → 再インストール。
+    """
+    if purelib is None:
+        import sysconfig
+        purelib = Path(sysconfig.get_paths()["purelib"])
+    if not purelib.is_dir():
+        return []
+    return sorted(p.name for p in purelib.glob("~*gram*"))
+
+
 def doctor_main(
     *,
     engram_home: Path | None = None,
@@ -851,6 +897,14 @@ def doctor_main(
     _conn.close()
     row("SQLite 拡張ロード対応", "[OK]" if ext_ok else "[NG]",
         "" if ext_ok else "uv 管理の Python で入れ直してください(README 参照)")
+
+    # pip 再インストール失敗の残骸(~ngram 等)があると import 自体が壊れる
+    remnants = find_install_remnants()
+    row("インストール健全性", "[OK]" if not remnants else "[NG]",
+        "" if not remnants else (
+            f"site-packages に残骸: {', '.join(remnants)} "
+            "(engram プロセスを止めて残骸を削除し、再インストールしてください)"
+        ))
     print()
 
     # config.toml
@@ -913,6 +967,14 @@ def doctor_main(
         )
     row("埋め込みモデルキャッシュ", "[OK]" if embed_cache else "[--]",
         "あり" if embed_cache else f"未ダウンロード ({hf_cache})")
+
+    # 埋め込み実行系(ONNX が既定。未生成なら torch フォールバックで重い)
+    try:
+        _settings_for_backend = get_settings()
+        backend_status, backend_detail = check_embed_backend(_settings_for_backend)
+    except Exception as e:
+        backend_status, backend_detail = "[NG]", f"設定読み込み失敗: {e}"
+    row("埋め込み実行系", backend_status, backend_detail)
 
     print()
 

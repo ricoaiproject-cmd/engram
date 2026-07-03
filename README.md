@@ -100,7 +100,9 @@ useful from day one.
 engram doctor
 ```
 
-Shows Python version, config file, model cache, and per-agent registration
+Shows Python version, config file, model cache, embedding backend
+(ONNX / torch), install health (detects leftover `~ngram`-style remnants of a
+failed pip reinstall that break `import engram`), and per-agent registration
 status as `[OK]` / `[NG]` / `[--]`.
 
 ### Re-run setup (e.g. after installing a new agent)
@@ -130,11 +132,36 @@ Valid names: `claude` / `codex` / `gemini` (`antigravity` is an alias for
 lets you pick by number (Enter selects all); `--non-interactive` registers all
 detected agents as before.
 
+### Faster startup with ONNX (new in v0.6)
+
+Run this once:
+
+```powershell
+engram export-onnx
+```
+
+This converts the embedding model to ONNX (no extra dependencies — the
+already-installed torch does the one-time conversion) and the server starts
+using it automatically (`embed_backend=auto`). Startup drops from 12–24 s
+(torch import) to **~2 s**, and no MCP client timeout tuning is needed
+anymore.
+
+Safety: the export verifies that the ONNX embeddings match the torch path on
+a set of sample texts (min cosine ≥ 0.999, including a long text that crosses
+ModernBERT's sliding-window boundary) and refuses to install a drifted model —
+a silently drifted embedding space would corrupt recall against your existing
+`index.db`.
+
+`embed_backend` in `config.toml` (or `ENGRAM_EMBED_BACKEND`) selects the
+runtime: `auto` (default; ONNX if exported, else torch), `onnx` (forced;
+errors if not exported), `torch` (forced fallback).
+
 ### Startup mode (`ENGRAM_PRELOAD`)
 
-Loading the embedding model (torch / sentence-transformers) can take 50+
-seconds on a cold start. The `ENGRAM_PRELOAD` environment variable controls
-when that load happens:
+With the ONNX backend the preload is cheap and the default `blocking` needs no
+tuning. The numbers below describe the **torch fallback** (no ONNX model
+exported yet) — kept because they explain why the design looks like this. The
+`ENGRAM_PRELOAD` environment variable controls when the model load happens:
 
 | Value | Behavior |
 |---|---|

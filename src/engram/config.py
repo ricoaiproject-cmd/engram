@@ -28,6 +28,10 @@ class Settings:
 
     # --- 埋め込み(Ruri-v3 はプレフィックス必須)---
     embed_model: str = "cl-nagoya/ruri-v3-130m"
+    # 実行系の選択。"auto" は export-onnx 済みなら ONNX(軽量・起動1〜2秒)、
+    # 未生成なら torch(sentence-transformers、import が重い)へフォールバック。
+    # "onnx" / "torch" で強制。詳細は embedder.make_embedder を参照。
+    embed_backend: str = "auto"          # "auto" | "onnx" | "torch"
     query_prefix: str = "検索クエリ: "
     doc_prefix: str = "検索文書: "
 
@@ -109,6 +113,11 @@ class Settings:
     def db_path(self) -> Path:
         return self.data_dir / "index.db"
 
+    @property
+    def onnx_model_dir(self) -> Path:
+        """export-onnx が生成する ONNX モデルの置き場所(モデル名ごとに分離)。"""
+        return self.data_dir / "onnx" / self.embed_model.replace("/", "--")
+
 
 def config_path() -> Path:
     """ユーザー設定ファイルの場所(engram setup が生成する)。"""
@@ -131,6 +140,7 @@ _ENV_OVERRIDES = {
     "memories_dir": "ENGRAM_MEMORIES_DIR",
     "data_dir": "ENGRAM_DATA_DIR",
     "embed_model": "ENGRAM_EMBED_MODEL",
+    "embed_backend": "ENGRAM_EMBED_BACKEND",
 }
 
 

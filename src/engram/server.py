@@ -273,6 +273,11 @@ def _preload() -> None:
 
 def main() -> None:
     """stdio MCP サーバーを起動する。"""
+    # 【v0.6.0〜】既定の実行系は ONNX(embed_backend=auto + export-onnx 済み)で、
+    # import+モデルロードは1〜2秒。以下の病理は torch 経路(ONNX 未生成の
+    # フォールバック)にのみ該当するが、そこに戻ると何が起きるかの記録として残す。
+    # blocking 既定は ONNX でも無害(先読みが軽いだけ)なので変更しない。
+    #
     # torch / sentence_transformers の import は非常に重い(実測: import だけで
     # cold 50秒超)。これを mcp.run() の前にメインスレッドで実行すると initialize
     # ハンドシェイクがその間ブロックされ、起動タイムアウトの短い MCP クライアント
