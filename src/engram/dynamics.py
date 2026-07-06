@@ -100,6 +100,36 @@ def final_score(
     )
 
 
+def normalize_relevances(
+    relevances: Mapping[str, float],
+    *,
+    floor: float = 0.10,
+) -> dict[str, float]:
+    """候補集合内で関連度を min-max 正規化する(Generative Agents 流)。
+
+    埋め込みのコサイン類似度は狭い帯に圧縮されがちで(Ruri で 0.8〜0.87、
+    実データで確認)、素の値を final_score の加重和に使うと関連度の弁別力が
+    名目の重み(w_relevance=0.6)より遥かに小さくなり、活性度・重要度の下駄が
+    事実上ランキングを支配する(=汎用の高活性記憶が無関係なクエリに出しゃばる)。
+    加重和の典拠である Generative Agents (Park et al. 2023) は各成分を
+    検索候補内で min-max 正規化してから加重和しており、それに倣う。
+
+    分母には floor を敷く: spread = max(max−min, floor)。
+    候補全体が同程度の関連度しか持たない(=クエリが弁別的でない)とき、
+    微小差を 0..1 へ増幅せず、関連度の寄与を実際の差に比例して縮める。
+    このとき順位は活性度・重要度側に委ねられる(ACT-R でいう、手がかりが
+    弱いときの基底レベル活性度へのフォールバックに相当)。
+
+    正規化値は順位付け専用。報告用 relevance・しきい値判定
+    (deep/exhaustive 自動発動、surface の関連度ゲート)は生値を使い続けること。
+    """
+    if not relevances:
+        return {}
+    lo = min(relevances.values())
+    spread = max(max(relevances.values()) - lo, floor)
+    return {id_: (v - lo) / spread for id_, v in relevances.items()}
+
+
 def rrf_merge(rankings: Sequence[Sequence[str]], *, k: int = 60) -> dict[str, float]:
     """Reciprocal Rank Fusion。複数の順位リスト(ベクトル近傍・BM25 等)を統合する。
 

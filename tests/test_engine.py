@@ -793,7 +793,40 @@ class TestExhaustiveRecall:
         assert hit_map["R"]["relevance"] == pytest.approx(1.0, abs=1e-5)
 
     def test_fast_buries_what_exhaustive_surfaces(self, tmp_path):
-        """対比: 同じ沈んだ高関連記憶 R は fast では高活性 G に首位を奪われる。"""
+        """対比: 沈んだ高関連記憶 R が fast で高活性 G に首位を奪われるのは、
+        関連度差が正規化の床(relevance_norm_floor)未満に圧縮されている場合。
+
+        かつては関連度差が大きくても(1.0 vs 0.6)活性度の下駄で逆転していたが、
+        候補内 min-max 正規化の導入(2026-07-06)で、明確な関連度差は勝つように
+        なった。fast が活性度側に順位を委ねるのは、候補間の関連度がほぼ無差別で
+        クエリが弁別的でないときだけ。その場合の掘り起こしが exhaustive の役割。"""
+        embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
+        engine, db, store = _build_engine(tmp_path, embedder=embedder)
+
+        r = _fake_db_mem(id="R", type="knowledge", importance=1,
+                         created_at=NOW - 1000 * DAY, path="/tmp/R.md")
+        g = _fake_db_mem(id="G", type="preference", importance=9,
+                         created_at=NOW - DAY, path="/tmp/G.md")
+        db.all_memories.return_value = [r, g]
+        # 圧縮帯: 差 0.04 は床(0.10)未満 → 関連度は増幅されず活性度が順位を決める
+        db.vector_search.return_value = [("R", 0.84), ("G", 0.80)]
+        db.keyword_search.return_value = []
+        db.get_events.return_value = {
+            "R": [(NOW - 1000 * DAY, 1.0)],
+            "G": [(NOW - DAY, 3.0), (NOW - 2 * DAY, 2.0)],
+        }
+        store.read.side_effect = lambda p: _fake_record(
+            id=Path(p).stem, content=f"{Path(p).stem} の本文"
+        )
+
+        result = engine.recall("ターゲット", mode="fast", now=NOW)
+
+        # 弁別不能な圧縮帯では高活性 G が首位(基底レベルへのフォールバック)
+        assert result["hits"][0]["id"] == "G"
+
+    def test_fast_no_longer_buries_clear_relevance_gap(self, tmp_path):
+        """回帰: 関連度差が明確(1.0 vs 0.6)なら、fast でも沈んだ R が
+        高活性 G に勝つこと(正規化導入前はここが逆転していた)。"""
         embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
         engine, db, store = _build_engine(tmp_path, embedder=embedder)
 
@@ -814,8 +847,7 @@ class TestExhaustiveRecall:
 
         result = engine.recall("ターゲット", mode="fast", now=NOW)
 
-        # fast は活性度を加味するので、関連度最大の R ではなく高活性 G が首位
-        assert result["hits"][0]["id"] == "G"
+        assert result["hits"][0]["id"] == "R"
 
     def test_deep_auto_escalates_to_exhaustive(self, tmp_path):
         """deep でも最高スコアが弱いとき exhaustive へ自動エスカレーションし、
@@ -1044,3 +1076,97 @@ class TestForgetTrashPath:
             assert after_path.is_file(), "db.set_path 後の新パスに実ファイルが存在すること"
         finally:
             engine.db.close()
+
+
+# ---------------------------------------------------------------------------
+# 関連度の候補内正規化(コサイン圧縮対策)の回帰テスト
+# ---------------------------------------------------------------------------
+
+class TestRelevanceNormalization:
+    """2026-07-06 のベースライン測定で観測された逆転の再現と修正確認。
+
+    実データでは上位5件の57.3%が無関係で、うち18.7%は高活性の汎用
+    プリファレンスだった(15クエリ×5件)。原因はコサインの値域圧縮
+    (0.8〜0.87)により関連度の弁別力が潰れ、活性度+重要度の下駄が
+    順位を支配していたこと。候補内 min-max 正規化で修正する。
+    """
+
+    def _two_memories(self, tmp_path):
+        """TARGET=関連度は高いが沈んだ専門知識 / PREF=関連度は低いが常連の汎用記憶。"""
+        engine, db, store = _build_engine(tmp_path)
+
+        target = _fake_db_mem(id="TARGET", importance=6, path="/tmp/target.md",
+                              created_at=NOW - 90 * DAY)
+        pref = _fake_db_mem(id="PREF", importance=9, path="/tmp/pref.md",
+                            created_at=NOW - 90 * DAY)
+        db.all_memories.return_value = [target, pref]
+        db.keyword_search.return_value = []
+        db.get_links.return_value = []
+        db.get_embeddings.return_value = {}
+
+        records = {
+            "/tmp/target.md": _fake_record(id="TARGET", importance=6,
+                                           path="/tmp/target.md",
+                                           content="ドライブ文字漂流の真因と対処"),
+            "/tmp/pref.md": _fake_record(id="PREF", importance=9,
+                                         path="/tmp/pref.md",
+                                         content="ユーザーの呼び方ルール"),
+        }
+        store.read.side_effect = lambda p: records[str(p)]
+        return engine, db, store
+
+    def test_compressed_relevance_wins_over_activation_gate(self, tmp_path):
+        """圧縮帯の関連度差(0.87 vs 0.80)が、常連記憶の活性度+重要度の下駄に
+        勝つこと(修正前は PREF が1位だった逆転の回帰テスト)。"""
+        engine, db, store = self._two_memories(tmp_path)
+
+        # 圧縮帯: 差は 0.07 しかない
+        db.vector_search.return_value = [("TARGET", 0.87), ("PREF", 0.80)]
+        # PREF は毎セッション強化されている常連(高活性)。TARGET は長期未使用
+        db.get_events.return_value = {
+            "PREF": [(NOW - i * DAY, 1.0) for i in range(1, 11)],
+        }
+
+        result = engine.recall("ドライブ文字変更の影響", mode="fast", now=NOW,
+                               record_hits=False)
+
+        ids = [h["id"] for h in result["hits"]]
+        assert ids[0] == "TARGET", (
+            f"関連度の高い記憶が常連記憶に負けた(修正前の逆転が再発): {ids}")
+        # 報告用 relevance は生値のまま(正規化値を漏らさない)
+        top = result["hits"][0]
+        assert abs(top["relevance"] - 0.87) < 1e-6
+
+    def test_tiny_spread_falls_back_to_activation(self, tmp_path):
+        """候補間の関連度差が床未満(=クエリが弁別的でない)のときは、
+        活性度・重要度側で順位が決まること(基底レベルへのフォールバック)。"""
+        engine, db, store = self._two_memories(tmp_path)
+
+        # ほぼ無差別: 差 0.005(床 0.10 未満なので増幅されない)
+        db.vector_search.return_value = [("TARGET", 0.805), ("PREF", 0.800)]
+        db.get_events.return_value = {
+            "PREF": [(NOW - i * DAY, 1.0) for i in range(1, 11)],
+        }
+
+        result = engine.recall("あいまいなクエリ", mode="fast", now=NOW,
+                               record_hits=False)
+
+        ids = [h["id"] for h in result["hits"]]
+        assert ids[0] == "PREF", f"弁別不能時は高活性側が先頭のはず: {ids}"
+
+    def test_escalation_still_uses_raw_scale(self, tmp_path):
+        """正規化で最上位候補の順位付けスコアが変わっても、deep 自動発動の
+        判定は生値スコアで行われる(高関連ヒットがあれば発動しない)こと。"""
+        engine, db, store = self._two_memories(tmp_path)
+
+        db.vector_search.return_value = [("TARGET", 0.87), ("PREF", 0.80)]
+        db.get_events.return_value = {
+            "PREF": [(NOW - i * DAY, 1.0) for i in range(1, 11)],
+        }
+
+        result = engine.recall("ドライブ文字変更の影響", mode="fast", now=NOW,
+                               record_hits=False)
+
+        # 生値の複合スコア最高値は PREF 側で約 0.86 → 0.35 を大きく超える
+        assert result["auto_deepened"] is False
+        assert result["mode"] == "fast"
