@@ -11,6 +11,7 @@ argparse のサブコマンドで engine を直接叩く。出力は人間可読
     engram stats / engram reindex
     engram consolidation-candidates
     engram mark-consolidated NEW_ID --episodes ID1,ID2,...  統合完了を記録する
+    engram skill-candidates              スキル化候補の episode クラスタを表示する
     engram surface "発話" [--room X]     自発的想起の手動確認(何も書き込まない)
     engram hook session-end|user-prompt  エージェントのフック用入口(stdin JSON)
     engram export-onnx [--force]         埋め込みモデルの ONNX 化(起動高速化)
@@ -262,6 +263,12 @@ def main() -> None:
         help="統合元 episode ID のカンマ区切り",
     )
 
+    # --- skill-candidates ---
+    subparsers.add_parser(
+        "skill-candidates",
+        help="スキル化候補の episode クラスタを表示する",
+    )
+
     # --- setup ---
     p_setup = subparsers.add_parser("setup", help="セットアップウィザードを実行する")
     p_setup.add_argument(
@@ -494,6 +501,19 @@ def main() -> None:
         episode_ids = [e.strip() for e in args.episodes.split(",") if e.strip()]
         result = engine.mark_consolidated(episode_ids, args.new_memory_id)
         _print_result(result, as_json=args.as_json)
+
+    elif args.command == "skill-candidates":
+        result = engine.skill_candidates()
+        if args.as_json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            clusters = result.get("clusters", [])
+            print(f"スキル化候補クラスタ: {len(clusters)} 件")
+            for i, cluster in enumerate(clusters, 1):
+                print(f"\nクラスタ {i} ({len(cluster['ids'])} 件):")
+                for id_, content in zip(cluster["ids"], cluster.get("contents", [])):
+                    preview = content.replace("\n", " ")[:60] if content else "(内容なし)"
+                    print(f"  [{id_}] {preview}")
 
 
 if __name__ == "__main__":

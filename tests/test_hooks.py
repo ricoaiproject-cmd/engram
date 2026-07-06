@@ -13,6 +13,7 @@ from engram.engine import MemoryEngine
 from engram.hooks import (
     _consolidation_nudge,
     _read_consolidation_state,
+    _skill_nudge,
     _write_consolidation_state,
     run_session_end,
     run_user_prompt,
@@ -362,6 +363,133 @@ class TestSessionEndWritesConsolidationState:
 
 
 # ---------------------------------------------------------------------------
+# ④ スキル化候補の自動促し(skill nudge)
+# ---------------------------------------------------------------------------
+
+class TestSkillNudge:
+    """_skill_nudge の単体テスト(状態ファイルの読み書きのみ、エンジン不使用)。"""
+
+    def test_nudge_fires_when_clusters_at_threshold(self, engram_home):
+        """クラスタ数が閾値以上・最終促しが古ければ促し文が返ること。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "skill_clusters": 1,  # skill_nudge_min_clusters の既定値と同数
+            "last_skill_nudged_at": NOW - 30 * DAY,
+        })
+
+        msg = _skill_nudge(settings, now=NOW)
+        assert msg is not None
+        assert "1" in msg
+        assert "skill_candidates" in msg
+        assert "mark_consolidated" in msg
+
+    def test_no_nudge_when_setting_disabled(self, engram_home):
+        """skill_nudge=False なら閾値・間隔を満たしていても促さないこと。"""
+        (engram_home / "config.toml").write_text(
+            "skill_nudge = false\n", encoding="utf-8",
+        )
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "skill_clusters": 10, "last_skill_nudged_at": NOW - 30 * DAY,
+        })
+
+        assert _skill_nudge(settings, now=NOW) is None
+
+    def test_no_nudge_below_cluster_threshold(self, engram_home):
+        """クラスタ数が閾値未満なら促さないこと。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "skill_clusters": 0,  # min_clusters(既定1)未満
+            "last_skill_nudged_at": NOW - 30 * DAY,
+        })
+
+        assert _skill_nudge(settings, now=NOW) is None
+
+    def test_no_nudge_when_interval_not_elapsed(self, engram_home):
+        """最短間隔(既定7日)が経過していなければ促さないこと(再促しの抑制)。"""
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "skill_clusters": 2,
+            "last_skill_nudged_at": NOW - 1 * DAY,  # 7日未満しか経っていない
+        })
+
+        assert _skill_nudge(settings, now=NOW) is None
+
+
+class TestSessionEndWritesSkillClusters:
+    def test_run_session_end_writes_skill_clusters(self, engram_home, tmp_path,
+                                                     monkeypatch):
+        """run_session_end が auto-encode 後に skill_clusters を状態ファイルへ
+        書くこと(skill_nudge が既定 True の場合)。"""
+        import engram.engine
+        monkeypatch.setattr(engram.engine, "build_engine", _fake_build_engine)
+
+        transcript = tmp_path / "t.jsonl"
+        _write_transcript(transcript)
+        stdin = json.dumps({
+            "session_id": "sess-skill-state",
+            "transcript_path": str(transcript),
+            "cwd": "C:/proj/demo",
+        })
+
+        assert run_session_end(stdin) == 0
+
+        settings = get_settings()
+        state_path = settings.data_dir / "consolidation_state.json"
+        assert state_path.is_file()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert "skill_clusters" in state
+
+
+class TestSkillNudgeViaUserPrompt:
+    """run_user_prompt を通じたスキル化候補ナッジの結線テスト。"""
+
+    def test_user_prompt_emits_skill_nudge(self, engram_home, capsys):
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "skill_clusters": 2, "last_skill_nudged_at": 0.0,
+        })
+
+        stdin = json.dumps({
+            "session_id": "sess-skill-nudge-1",
+            "prompt": "次の作業を始めましょうか",
+            "cwd": "C:/anywhere",
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert "skill_candidates" in ctx
+
+    def test_consolidation_and_skill_nudge_both_present(self, engram_home, capsys):
+        """統合とスキル化の両方の促し条件が揃えば、両方とも additionalContext に
+        入ること。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        settings = get_settings()
+        _write_consolidation_state(settings, {
+            "clusters": 3, "last_nudged_at": 0.0,
+            "skill_clusters": 2, "last_skill_nudged_at": 0.0,
+        })
+
+        stdin = json.dumps({
+            "session_id": "sess-both-nudge",
+            "prompt": "次の作業を始めましょうか",
+            "cwd": "C:/anywhere",
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert "consolidation_candidates" in ctx
+        assert "skill_candidates" in ctx
+
+
+# ---------------------------------------------------------------------------
 # フック登録(setup)
 # ---------------------------------------------------------------------------
 
@@ -485,12 +613,19 @@ class TestMarkConsolidatedRefreshesState:
                 # 統合後は1クラスタだけ残っている想定
                 return {"clusters": [{"ids": ["a", "b"], "contents": ["x", "y"]}]}
 
+            def skill_candidates(self):
+                # スキル化候補側も1クラスタだけ残っている想定
+                return {"clusters": [{"ids": ["c", "d"], "contents": ["y", "z"]}]}
+
         monkeypatch.setattr(server, "_engine", _FakeEngine())
         # 事前状態: 統合前の古いクラスタ数
-        _write_consolidation_state(settings, {"clusters": 5, "checked_at": 0.0})
+        _write_consolidation_state(
+            settings, {"clusters": 5, "skill_clusters": 9, "checked_at": 0.0}
+        )
 
         result = server.mark_consolidated(["e1", "e2"], "new1")
 
         assert result["status"] == "ok"
         state = _read_consolidation_state(settings)
         assert state["clusters"] == 1  # 5 のまま放置されない
+        assert state["skill_clusters"] == 1  # 9 のまま放置されない(スキル化候補側も更新)
