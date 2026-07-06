@@ -834,6 +834,55 @@ class MemoryEngine:
         return self.db.stats()
 
     # ------------------------------------------------------------- consolidation
+    @staticmethod
+    def _greedy_clusters(
+        valid_ids: list[str], emb_map: dict, sim: float, *, min_size: int
+    ) -> list[list[str]]:
+        """埋め込みコサイン >= sim の貪欲法クラスタリング。
+
+        先頭から順に未使用の id を核にして、コサインが閾値以上の未使用 id を
+        すべて併合する(consolidation_candidates / skill_candidates 共通処理)。
+        min_size 未満のクラスタは捨てる。
+        """
+        used = set()
+        clusters: list[list[str]] = []
+        for i, id_a in enumerate(valid_ids):
+            if id_a in used:
+                continue
+            cluster = [id_a]
+            used.add(id_a)
+            vec_a = emb_map[id_a]
+            for id_b in valid_ids[i + 1:]:
+                if id_b in used:
+                    continue
+                vec_b = emb_map[id_b]
+                cos = float(np.dot(vec_a, vec_b))
+                if cos >= sim:
+                    cluster.append(id_b)
+                    used.add(id_b)
+            if len(cluster) >= min_size:
+                clusters.append(cluster)
+        return clusters
+
+    def _clusters_with_contents(
+        self, clusters: list[list[str]], mem_rows: dict
+    ) -> list[dict]:
+        """各クラスタの id 群から本文(content)を取得し、返却形式に整形する。"""
+        result_clusters = []
+        for cluster_ids in clusters:
+            contents = []
+            for id_ in cluster_ids:
+                mem = mem_rows.get(id_)
+                if mem is None:
+                    continue
+                try:
+                    rec = self.store.read(Path(mem["path"]))
+                    contents.append(rec.content)
+                except Exception:
+                    contents.append("")
+            result_clusters.append({"ids": cluster_ids, "contents": contents})
+        return result_clusters
+
     def consolidation_candidates(self, *, now: float | None = None) -> dict:
         """tier=hot で settings.consolidate_min_age_days より古い episode を取得し、
         埋め込みコサイン >= settings.consolidate_cluster_sim の貪欲法でクラスタ化。
@@ -865,41 +914,56 @@ class MemoryEngine:
         if len(valid_ids) < 2:
             return {"clusters": []}
 
-        # 貪欲クラスタリング
-        used = set()
-        clusters: list[list[str]] = []
-        for i, id_a in enumerate(valid_ids):
-            if id_a in used:
-                continue
-            cluster = [id_a]
-            used.add(id_a)
-            vec_a = emb_map[id_a]
-            for id_b in valid_ids[i + 1:]:
-                if id_b in used:
-                    continue
-                vec_b = emb_map[id_b]
-                cos = float(np.dot(vec_a, vec_b))
-                if cos >= s.consolidate_cluster_sim:
-                    cluster.append(id_b)
-                    used.add(id_b)
-            if len(cluster) >= 2:
-                clusters.append(cluster)
+        clusters = self._greedy_clusters(
+            valid_ids, emb_map, s.consolidate_cluster_sim, min_size=2
+        )
 
         # 各クラスタの contents を取得
         mem_rows = {m["id"]: m for m in all_mems}
-        result_clusters = []
-        for cluster_ids in clusters:
-            contents = []
-            for id_ in cluster_ids:
-                mem = mem_rows.get(id_)
-                if mem is None:
-                    continue
-                try:
-                    rec = self.store.read(Path(mem["path"]))
-                    contents.append(rec.content)
-                except Exception:
-                    contents.append("")
-            result_clusters.append({"ids": cluster_ids, "contents": contents})
+        result_clusters = self._clusters_with_contents(clusters, mem_rows)
+
+        return {"clusters": result_clusters}
+
+    def skill_candidates(self, *, now: float | None = None) -> dict:
+        """同じ形の作業を記録した episode の「スキル化候補」クラスタを返す。
+
+        consolidation_candidates(統合候補)との違い:
+        - 年齢フィルタなし: 直近の繰り返し作業こそスキル化提案の対象であり、
+          consolidate_min_age_days のように「古くなるまで待つ」必要がない。
+        - クラスタの最小件数は settings.skill_min_count(既定3、三度ルール)。
+          統合(要約による圧縮)の目的である 2 件クラスタとは異なり、単発〜
+          偶然の一致をスキル化提案してノイズにしないため、より厳しい下限を
+          設ける。
+        - 目的は要約(記憶の圧縮)ではなく、手順書としての切り出し(スキル化)
+          をユーザーへ提案する判断材料の提示。作成自体は行わない。
+
+        返り値は consolidation_candidates と同形:
+        {"clusters": [{"ids": [...], "contents": [...]}]}
+        """
+        # now は年齢フィルタが無いため使わないが、consolidation_candidates と
+        # 同じ呼び出し形(テストからの now 注入)を揃えるために引数だけ残す。
+        s = self.settings
+
+        # tier=hot、type=episode の記憶を取得(年齢フィルタなし)
+        all_mems = self.db.all_memories(tiers=["hot"], types=["episode"])
+        all_ids = [mem["id"] for mem in all_mems]
+
+        if not all_ids:
+            return {"clusters": []}
+
+        # 埋め込みを取得してクラスタリング
+        emb_map = self.db.get_embeddings(all_ids)
+        valid_ids = [id_ for id_ in all_ids if id_ in emb_map]
+
+        if len(valid_ids) < s.skill_min_count:
+            return {"clusters": []}
+
+        clusters = self._greedy_clusters(
+            valid_ids, emb_map, s.skill_cluster_sim, min_size=s.skill_min_count
+        )
+
+        mem_rows = {m["id"]: m for m in all_mems}
+        result_clusters = self._clusters_with_contents(clusters, mem_rows)
 
         return {"clusters": result_clusters}
 

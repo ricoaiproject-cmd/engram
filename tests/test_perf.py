@@ -134,6 +134,7 @@ _EXPECTED_TOOLS = {
     "forget",
     "consolidation_candidates",
     "mark_consolidated",
+    "skill_candidates",
     "reindex",
     "stats",
 }

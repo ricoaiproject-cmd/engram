@@ -162,6 +162,46 @@ def _consolidation_nudge(settings: Settings, now: float | None = None) -> str | 
     )
 
 
+# ---------------------------------------------------------------------------
+# スキル化候補の自動促し(skill nudge)
+#
+# consolidation nudge と完全に相似形の機構。同じ形の作業を記録した episode が
+# 一定件数(三度ルール)以上クラスタを成したら、手順として切り出す(スキル化)
+# 価値があるとみて、エージェントにユーザーへの提案を促す。状態ファイルは
+# consolidation と共用(consolidation_state.json)し、キーだけ分ける。
+# ---------------------------------------------------------------------------
+
+def _skill_nudge(settings: Settings, now: float | None = None) -> str | None:
+    """スキル化候補が溜まっていたら促し文を返す(エンジン不使用の軽量判定)。
+
+    consolidate_nudge と同じゲート構造: 設定 off / クラスタ数が閾値未満 /
+    最短間隔未経過 / 状態ファイルへの書き込み失敗、のいずれかなら None。
+    """
+    if not settings.skill_nudge:
+        return None
+    state = _read_consolidation_state(settings)
+    clusters = int(state.get("skill_clusters", 0) or 0)
+    if clusters < settings.skill_nudge_min_clusters:
+        return None
+    ts = now if now is not None else time.time()
+    last = float(state.get("last_skill_nudged_at", 0.0) or 0.0)
+    if ts - last < settings.skill_nudge_interval_days * 86400.0:
+        return None
+    try:
+        _write_consolidation_state(settings, {"last_skill_nudged_at": ts})
+    except OSError:
+        return None
+    return (
+        f"(engram スキル化候補) 同じ形の作業を記録した episode が {clusters} "
+        f"クラスタ溜まっています(1クラスタ{settings.skill_min_count}件以上・"
+        "三度ルール)。区切りの良いところで skill_candidates を呼び、手順として"
+        "再利用できそうならスキル化(手順書の切り出し)をユーザーに提案してください。"
+        "勝手に作らず必ず承認を得ること。採用・見送りが決まったら、経緯を"
+        "remember(type=knowledge) で記録し、mark_consolidated(episode_ids, "
+        "new_memory_id) で元 episode を整理してください。"
+    )
+
+
 def run_session_end(stdin_text: str | None = None) -> int:
     """SessionEnd フック本体。常に 0 を返す(セッション終了を妨げない)。"""
     try:
@@ -227,6 +267,20 @@ def run_session_end(stdin_text: str | None = None) -> int:
             except Exception as e:
                 _log(settings, f"session-end 統合候補チェック失敗: {e!r}")
 
+        # スキル化候補の棚卸し(consolidation と同じ理由で、ここでまとめて計算)。
+        # 候補数を状態ファイルへ書き、次セッションの user-prompt が促す
+        if settings.skill_nudge:
+            try:
+                n_skill_clusters = len(
+                    engine.skill_candidates().get("clusters", [])
+                )
+                _write_consolidation_state(
+                    settings,
+                    {"skill_clusters": n_skill_clusters, "checked_at": time.time()},
+                )
+            except Exception as e:
+                _log(settings, f"session-end スキル候補チェック失敗: {e!r}")
+
         engine.db.close()
         _mark_encoded(settings, session_id)
         _log(
@@ -286,6 +340,11 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
         nudge = _consolidation_nudge(settings)
         if nudge:
             context_parts.append(nudge)
+
+        # スキル化候補の促し(consolidation とは独立。skill_nudge 設定でゲート)
+        skill_nudge = _skill_nudge(settings)
+        if skill_nudge:
+            context_parts.append(skill_nudge)
 
         if context_parts:
             payload = {

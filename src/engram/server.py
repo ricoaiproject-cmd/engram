@@ -10,7 +10,8 @@ mcp 公式 SDK の FastMCP(stdio)で engine の操作をツールとして公開
 - docstring がそのままツール説明になるので、エージェントが「いつ呼ぶべきか」を
   判断できる文面にする(日本語でよい)。
 - ツール: remember / recall / reinforce / correct / link / forget /
-         consolidation_candidates / mark_consolidated / reindex / stats
+         consolidation_candidates / mark_consolidated / skill_candidates /
+         reindex / stats
 - 引数は engine のシグネチャに合わせる(now は公開しない)。
 - main() でstdio実行: mcp.run()。
 """
@@ -248,6 +249,8 @@ def mark_consolidated(episode_ids: list[str], new_memory_id: str) -> dict:
     consolidation_candidates で提示されたクラスタを LLM が要約し、
     remember で新記憶を作成した後にこれを呼ぶ。
     元の episode は cold(長期保存)に降格し、derived_from リンクで繋がれる。
+    スキル化候補(skill_candidates)を整理したときも、対象 episode を
+    このツールで cold に降格して使う。
     """
     engine = _get_engine()
     with _timed("mark_consolidated"):
@@ -257,18 +260,44 @@ def mark_consolidated(episode_ids: list[str], new_memory_id: str) -> dict:
         )
     # 統合完了でクラスタ数が変わるので促し用の状態を即時更新する。
     # 怠ると次の session-end まで古いクラスタ数のまま促し続ける
+    # (consolidation・スキル化候補の両方を更新する)
     try:
         import time
 
         from .hooks import _write_consolidation_state
 
         n = len(engine.consolidation_candidates().get("clusters", []))
+        n_skill = len(engine.skill_candidates().get("clusters", []))
         _write_consolidation_state(
-            engine.settings, {"clusters": n, "checked_at": time.time()}
+            engine.settings,
+            {
+                "clusters": n,
+                "skill_clusters": n_skill,
+                "checked_at": time.time(),
+            },
         )
     except Exception:
         pass
     return result
+
+
+@mcp.tool()
+def skill_candidates() -> dict:
+    """スキル化候補の episode クラスタを返す。
+
+    同じ形の作業(手順)を記録した episode が3件以上(既定値。三度ルール)
+    似たクラスタを成しているとき、その手順を再利用可能なスキル(手順書。
+    Claude Code なら SKILL.md 等)として切り出す価値があるかを判断する
+    材料として使う。consolidation_candidates と違い年齢フィルタはない
+    (直近の繰り返し作業こそ対象)。
+    クラスタが見つかっても、スキル化するかどうかは必ずユーザーに提案して
+    承認を得ること。勝手に作成・配備しない。
+    採用・見送りが決まったら remember(type=knowledge)で経緯を記録し、
+    mark_consolidated(episode_ids, new_memory_id) で元 episode を整理する。
+    """
+    engine = _get_engine()
+    with _timed("skill_candidates"):
+        return engine.skill_candidates()
 
 
 @mcp.tool()

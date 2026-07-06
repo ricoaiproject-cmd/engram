@@ -104,6 +104,21 @@ class Settings:
     consolidate_nudge_min_clusters: int = 3     # このクラスタ数以上で促す
     consolidate_nudge_interval_days: float = 7.0  # 促しの最短間隔
 
+    # --- スキル化候補(skill nudge)---
+    # consolidation(統合)と相似形の機構。「同じ形の作業」を記録した episode が
+    # 一定件数(三度ルール)以上クラスタを成したら、手順として切り出す(スキル化)
+    # 価値があると見て、エージェントにユーザーへの提案を促す。consolidation と
+    # 違い、直近の繰り返し作業こそ対象にしたいため年齢フィルタは掛けない。
+    skill_nudge: bool = True
+    skill_min_count: int = 3            # 1クラスタこの件数以上でスキル化候補(三度ルール)
+    # episode の手順類似とみなすコサイン閾値。Ruri はコサインが 0.8 前後に
+    # 圧縮されるため、0.80 では実データ(86 episode)の大半が1つの巨大クラスタに
+    # 併合された。0.85 で初めて「同じ形の作業」(動画公開作業・決算転記・起案
+    # 作成など)が別クラスタに分離することを実測で確認(2026-07-06 校正)
+    skill_cluster_sim: float = 0.85
+    skill_nudge_min_clusters: int = 1   # このクラスタ数以上で促す(1つでも繰り返し作業があれば提案価値がある)
+    skill_nudge_interval_days: float = 7.0  # 促しの最短間隔
+
     # --- 観測性(perf ログ)---
     # MCP ツール呼び出しと起動(preload)の所要時間を data_dir/perf/perf_log.jsonl
     # に記録する。「調子が悪い」をデータで診断するための常時計測(軽量)。

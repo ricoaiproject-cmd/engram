@@ -39,6 +39,8 @@ def _settings(tmp_path: Path) -> Settings:
         correction_min_importance=7,
         consolidate_min_age_days=14,
         consolidate_cluster_sim=0.75,
+        skill_min_count=3,
+        skill_cluster_sim=0.80,
         colink_increment=0.1,
         colink_max=1.0,
         reinforce_weight=1.0,
@@ -505,6 +507,114 @@ class TestConsolidationCandidates:
 
         result = engine.consolidation_candidates(now=NOW)
         assert result["clusters"] == []
+
+
+# ---------------------------------------------------------------------------
+# skill_candidates のクラスタリングテスト
+# ---------------------------------------------------------------------------
+
+class TestSkillCandidates:
+    def test_clusters_three_similar_episodes(self, tmp_path):
+        """類似 episode が3件(skill_min_count)集まればクラスタとして返ること。"""
+        engine, db, store = _build_engine(tmp_path)
+        embedder = engine.embedder
+
+        text = "月次の起案文書チェックを実施した"
+        ep_ids = ["EP001", "EP002", "EP003"]
+        ep_mems = [
+            _fake_db_mem(id=eid, type="episode", tier="hot", created_at=NOW)
+            for eid in ep_ids
+        ]
+        db.all_memories.return_value = ep_mems
+
+        vec = embedder.embed_docs([text])[0]
+        db.get_embeddings.return_value = {eid: vec for eid in ep_ids}
+        for eid in ep_ids:
+            store.read.return_value = _fake_record(id=eid, content=text)
+
+        result = engine.skill_candidates(now=NOW)
+        clusters = result["clusters"]
+        assert len(clusters) == 1
+        assert set(clusters[0]["ids"]) == set(ep_ids)
+
+    def test_no_cluster_below_skill_min_count(self, tmp_path):
+        """2件しか無いクラスタは skill_min_count(既定3)未満なので返らないこと。"""
+        engine, db, store = _build_engine(tmp_path)
+        embedder = engine.embedder
+
+        text = "月次の起案文書チェックを実施した"
+        ep_ids = ["EP001", "EP002"]
+        ep_mems = [
+            _fake_db_mem(id=eid, type="episode", tier="hot", created_at=NOW)
+            for eid in ep_ids
+        ]
+        db.all_memories.return_value = ep_mems
+
+        vec = embedder.embed_docs([text])[0]
+        db.get_embeddings.return_value = {eid: vec for eid in ep_ids}
+
+        result = engine.skill_candidates(now=NOW)
+        assert result["clusters"] == []
+
+    def test_no_cluster_below_similarity_threshold(self, tmp_path):
+        """コサイン類似度が skill_cluster_sim 未満のペアはクラスタにならないこと。"""
+        engine, db, store = _build_engine(tmp_path)
+
+        ep_ids = ["EP001", "EP002", "EP003"]
+        ep_mems = [
+            _fake_db_mem(id=eid, type="episode", tier="hot", created_at=NOW)
+            for eid in ep_ids
+        ]
+        db.all_memories.return_value = ep_mems
+
+        # 直交に近いベクトル(cos がほぼ0、skill_cluster_sim=0.80 未満)を用意
+        dim = engine.embedder.dim
+        vecs = {}
+        for i, eid in enumerate(ep_ids):
+            v = np.zeros(dim, dtype=np.float32)
+            v[i % dim] = 1.0
+            vecs[eid] = v
+        db.get_embeddings.return_value = vecs
+
+        result = engine.skill_candidates(now=NOW)
+        assert result["clusters"] == []
+
+    def test_young_episode_is_still_candidate(self, tmp_path):
+        """consolidation と違い年齢フィルタが無いこと(作成直後でも対象になる)。"""
+        engine, db, store = _build_engine(tmp_path)
+        embedder = engine.embedder
+
+        text = "決算資料の数値突合を実施した"
+        ep_ids = ["EP_NEW1", "EP_NEW2", "EP_NEW3"]
+        # created_at を NOW(作成直後、consolidate_min_age_days=14 を大幅に下回る)
+        ep_mems = [
+            _fake_db_mem(id=eid, type="episode", tier="hot", created_at=NOW)
+            for eid in ep_ids
+        ]
+        db.all_memories.return_value = ep_mems
+
+        vec = embedder.embed_docs([text])[0]
+        db.get_embeddings.return_value = {eid: vec for eid in ep_ids}
+        for eid in ep_ids:
+            store.read.return_value = _fake_record(id=eid, content=text)
+
+        result = engine.skill_candidates(now=NOW)
+        assert len(result["clusters"]) == 1
+        assert set(result["clusters"][0]["ids"]) == set(ep_ids)
+
+    def test_cold_tier_episodes_excluded(self, tmp_path):
+        """tier=cold の episode は db.all_memories(tiers=["hot"]) の絞り込みで
+        そもそも渡ってこない(hot のみが対象であること)を確認する。"""
+        engine, db, store = _build_engine(tmp_path)
+
+        # db.all_memories は tiers=["hot"] 呼び出しに対して空を返すよう設定
+        # (cold の記憶は engine 側から見えない想定をモックで表現)
+        db.all_memories.return_value = []
+
+        result = engine.skill_candidates(now=NOW)
+        assert result["clusters"] == []
+        # tier=hot に限定して問い合わせていることを確認
+        db.all_memories.assert_called_with(tiers=["hot"], types=["episode"])
 
 
 # ---------------------------------------------------------------------------

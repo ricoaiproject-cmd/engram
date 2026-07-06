@@ -75,6 +75,15 @@
   元クラスタの経緯を残す)で保存し、`mark_consolidated(episode_ids, new_memory_id)`
   で元 episode を降格する。これは人間でいう睡眠中の記憶整理に相当する保守作業で、
   あなたにしかできない(engram 自身は要約できない)。
+- 文脈に「(engram スキル化候補)」という促しが差し込まれることがある。これは
+  同じ形の作業を記録した episode が一定件数以上(既定3件・三度ルール)似た
+  クラスタを成したという合図である。**区切りの良いタイミングで**対応する
+  こと: `skill_candidates` を呼び、返ってきたクラスタの episode 群が実際に
+  同じ形の手順であれば、スキル(再利用可能な手順書。Claude Code なら
+  SKILL.md 等)として切り出す価値があるかを判断し、**ユーザーに提案する**。
+  勝手にスキルを作成・配備してはならない。採用/見送りいずれの結論でも、
+  経緯を `remember`(type=knowledge)で記録し、`mark_consolidated(episode_ids,
+  new_memory_id)` で元 episode を降格して整理する。
 
 ## 6. してはいけないこと
 
