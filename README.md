@@ -445,6 +445,27 @@ tests/
 
 ---
 
+## Update
+
+Re-run the same one-line installer to overwrite with the latest version:
+
+```powershell
+irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
+```
+
+macOS / Linux:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
+```
+
+`uv tool upgrade engram` does the same.
+
+- Your memories and config (`~/.engram` and the memories folder) are kept — nothing is deleted
+- After updating, restart each agent that uses engram (Claude Code, etc.) so the MCP server reconnects
+
+---
+
 ## Uninstall
 
 ```powershell

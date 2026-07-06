@@ -407,6 +407,27 @@ tests/
 
 ---
 
+## アップデート
+
+インストールと同じ1行コマンドをもう一度実行するだけで、最新版に上書き更新されます:
+
+```powershell
+irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
+```
+
+macOS / Linux:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
+```
+
+`uv tool upgrade engram` でも同じです。
+
+- 記憶・設定(`~/.engram` と記憶フォルダ)はそのまま残ります。消えません
+- 更新後は、engram を使う各エージェント(Claude Code 等)を再起動してください(MCP サーバーの再接続に必要)
+
+---
+
 ## アンインストール
 
 ```powershell
