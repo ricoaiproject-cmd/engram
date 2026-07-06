@@ -131,3 +131,34 @@ def test_spread_weak_links_attenuate():
     nbrs = _graph({"seed": [("weak", 0.1), ("strong", 0.9)]})
     out = dyn.spread({"seed": 1.0}, nbrs, max_hops=1, hop_decay=0.7)
     assert out["strong"] > out["weak"] > 0.0
+
+
+# --- 関連度の候補内 min-max 正規化(コサイン圧縮対策) ---
+
+def test_normalize_stretches_compressed_band():
+    """Ruri 的な圧縮帯(0.8〜0.9)が 0..1 へ引き伸ばされること。"""
+    out = dyn.normalize_relevances({"a": 0.80, "b": 0.90, "c": 0.85}, floor=0.10)
+    assert math.isclose(out["a"], 0.0)
+    assert math.isclose(out["b"], 1.0)
+    assert math.isclose(out["c"], 0.5)
+
+
+def test_normalize_floor_damps_tiny_spread():
+    """候補間の差が床未満のとき、微小差を全力増幅しないこと。"""
+    out = dyn.normalize_relevances({"a": 0.80, "b": 0.82}, floor=0.10)
+    assert math.isclose(out["a"], 0.0)
+    assert math.isclose(out["b"], 0.2)  # 0.02/0.10。1.0 まで増幅しない
+
+
+def test_normalize_preserves_order():
+    vals = {"a": 0.81, "b": 0.87, "c": 0.84, "d": 0.79}
+    out = dyn.normalize_relevances(vals, floor=0.10)
+    order_in = sorted(vals, key=vals.get)
+    order_out = sorted(out, key=out.get)
+    assert order_in == order_out
+
+
+def test_normalize_edge_cases():
+    assert dyn.normalize_relevances({}) == {}
+    single = dyn.normalize_relevances({"only": 0.85}, floor=0.10)
+    assert math.isclose(single["only"], 0.0)  # 1候補は相対差ゼロ扱い

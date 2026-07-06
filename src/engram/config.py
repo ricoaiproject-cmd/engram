@@ -39,6 +39,12 @@ class Settings:
     w_relevance: float = 0.6
     w_activation: float = 0.25
     w_importance: float = 0.15
+    # 関連度の候補内 min-max 正規化(dynamics.normalize_relevances)の床。
+    # コサインの値域圧縮(Ruri で 0.8〜0.87)で関連度の弁別力が潰れ、活性度の
+    # 下駄が順位を支配する逆転への対策。候補間の spread がこの床未満のときは
+    # 増幅せず、実際の差に比例して関連度の寄与を縮める。0 に近づけるほど
+    # 微小差でも全力で増幅する(非推奨)。順位付け専用で、報告値・しきい値は生値。
+    relevance_norm_floor: float = 0.10
 
     # --- アクセスイベントの重み ---
     recall_hit_weight: float = 0.3   # recall で返却されただけ(弱い強化)

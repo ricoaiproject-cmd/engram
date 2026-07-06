@@ -139,12 +139,15 @@ class MemoryEngine:
            vector_search top-candidate_k と keyword_search top-candidate_k。
         2. dynamics.rrf_merge で統合 → 上位 ~candidate_k 件を候補に。
         3. 候補の relevance はベクトル類似度(FTS のみヒットは候補中の最小類似度を
-           割り当てる)。db.get_events で活性度を計算し dynamics.final_score で再ランク。
-           decay は dynamics.decay_rate(importance)。
+           割り当てる)。順位付けには候補内 min-max 正規化後の関連度
+           (dynamics.normalize_relevances、コサイン圧縮対策)を使い、
+           db.get_events で活性度を計算し dynamics.final_score で再ランク。
+           decay は dynamics.decay_rate(importance)。RecallHit.relevance は生値。
         4. 上位 limit 件を RecallHit で返し、record_hits なら recall_hit イベント
            (weight=settings.recall_hit_weight)を記録。
-        5. 最高スコア < settings.deep_score_threshold なら deep を自動発動して
-           統合し、結果に "auto_deepened": True を付ける。
+        5. 生値関連度による複合スコアの最高値 < settings.deep_score_threshold なら
+           deep を自動発動して統合し、結果に "auto_deepened": True を付ける
+           (正規化後スコアは候補集合ごとに尺度が動くため、しきい値比較は生値)。
 
         deep の追加手順:
         - tier に cold / superseded、type に episode も含めて 1 をやり直す。
@@ -191,7 +194,17 @@ class MemoryEngine:
                 # deep でも最高スコアが弱い=沈んだ記憶や candidate_k の枠外で
                 # 掘りきれていない可能性。関連度のみの網羅検索を試し、より関連度の
                 # 高い結果が得られたときだけ採用する(空振りで結果を劣化させない)。
-                deep_best = hits[0].score if hits else 0.0
+                # hit.score は候補内正規化後の値で尺度が動くため、しきい値との
+                # 比較は生値の複合スコアで行う(fast の best_score と同じ流儀)
+                deep_best = max(
+                    (dynamics.final_score(
+                        h.relevance, h.activation, round(h.importance * 10),
+                        w_relevance=self.settings.w_relevance,
+                        w_activation=self.settings.w_activation,
+                        w_importance=self.settings.w_importance,
+                    ) for h in hits),
+                    default=0.0,
+                )
                 if deep_best < self.settings.exhaustive_score_threshold:
                     ex_hits = self._exhaustive_recall(
                         query, limit=limit, type=type, rooms=rooms, now=ts)
@@ -257,6 +270,10 @@ class MemoryEngine:
 
         # 候補の relevance: ベクトル類似度 + FTS の BM25 順位写像(_hybrid_relevances)
         relevances = _hybrid_relevances(vec_results, kw_results)
+        # 順位付け用に候補内で min-max 正規化(コサイン圧縮対策)。
+        # 生値は RecallHit.relevance とエスカレーション判定に使い続ける。
+        rel_norm = dynamics.normalize_relevances(
+            relevances, floor=s.relevance_norm_floor)
 
         # 活性度を計算して最終スコアで再ランク
         candidate_ids = list(merged.keys())
@@ -266,6 +283,7 @@ class MemoryEngine:
             tiers=search_tiers, types=search_types, rooms=rooms)}
 
         scored: list[tuple[float, str]] = []
+        best_raw_score = 0.0  # deep 自動発動の判定は生値スコアで行う(尺度を変えない)
         for id_ in candidate_ids:
             mem = mem_rows.get(id_)
             if mem is None:
@@ -274,21 +292,27 @@ class MemoryEngine:
             d = dynamics.decay_rate(imp)
             act = dynamics.activation_norm(events_map.get(id_, []), now, d,
                                            min_elapsed=s.min_elapsed_seconds)
-            rel = relevances[id_]
             score = dynamics.final_score(
-                rel, act, imp,
+                rel_norm[id_], act, imp,
                 w_relevance=s.w_relevance,
                 w_activation=s.w_activation,
                 w_importance=s.w_importance,
             )
             scored.append((score, id_))
+            raw_score = dynamics.final_score(
+                relevances[id_], act, imp,
+                w_relevance=s.w_relevance,
+                w_activation=s.w_activation,
+                w_importance=s.w_importance,
+            )
+            if raw_score > best_raw_score:
+                best_raw_score = raw_score
 
         scored.sort(reverse=True)
         top = scored[:limit]
 
         # RecallHit を組み立て(content は path から読む)
         hits: list[RecallHit] = []
-        best_score = 0.0
         for score, id_ in top:
             mem = mem_rows[id_]
             imp = mem["importance"]
@@ -320,10 +344,8 @@ class MemoryEngine:
                 room=mem.get("room", "common"),
             )
             hits.append(hit)
-            if score > best_score:
-                best_score = score
 
-        return hits, best_score
+        return hits, best_raw_score
 
     def _deep_recall(
         self,
@@ -361,8 +383,17 @@ class MemoryEngine:
         kw_ids = [id_ for id_, _ in kw_results]
         merged = dynamics.rrf_merge([vec_ids, kw_ids], k=s.rrf_k)
 
-        # シード: fast_hits の上位
-        seed_map: dict[str, float] = {h.id: h.score for h in fast_hits}
+        # シード: fast_hits の上位。score は候補内正規化後の値で候補集合ごとに
+        # 尺度が変わるため、拡散の種は生値の複合スコアで組み直す(伝播量を安定させる)
+        seed_map: dict[str, float] = {
+            h.id: dynamics.final_score(
+                h.relevance, h.activation, round(h.importance * 10),
+                w_relevance=s.w_relevance,
+                w_activation=s.w_activation,
+                w_importance=s.w_importance,
+            )
+            for h in fast_hits
+        }
 
         # リンクから隣接関数を構築(co_recall/explicit/derived_from)
         all_candidate_ids = list(set(list(merged.keys()) + list(seed_map.keys())))
@@ -416,26 +447,34 @@ class MemoryEngine:
             if kind == "superseded_by":
                 successor_map[src] = dst
 
-        scored: list[tuple[float, str, str, float, float]] = []  # (score, id, via, rel, act)
+        # 1周目: 全候補の生の関連度を確定する(直接候補は hybrid relevance、
+        # 連想経由は実コサイン。連想経由ノードはクエリとの直接類似が低いからこそ
+        # リンクで辿られている — 強いリンクで繋がっていること自体が関連性の
+        # 証拠なので、拡散活性化の伝播スコアで関連度を底上げする。
+        # これが無いと連想記憶がノイズに埋もれて永久に出てこない)
+        rel_map: dict[str, float] = {}
         for id_ in all_ids:
-            mem = all_mem_rows.get(id_)
-            if mem is None:
+            if all_mem_rows.get(id_) is None:
                 continue
+            rel = relevances.get(id_, vec_sim.get(id_, min_vec_sim))
+            if id_ not in direct_ids:
+                rel = max(rel, spread_scores.get(id_, 0.0))
+            rel_map[id_] = rel
+
+        # 順位付け用に候補内で min-max 正規化(コサイン圧縮対策。fast と同じ理由)
+        rel_norm = dynamics.normalize_relevances(
+            rel_map, floor=s.relevance_norm_floor)
+
+        scored: list[tuple[float, str, str, float, float]] = []  # (score, id, via, rel, act)
+        for id_, rel in rel_map.items():
+            mem = all_mem_rows[id_]
             via = "direct" if id_ in direct_ids else "associative"
             imp = mem["importance"]
             d = dynamics.decay_rate(imp)
             act = dynamics.activation_norm(events_map.get(id_, []), now, d,
                                            min_elapsed=s.min_elapsed_seconds)
-            # 直接候補は hybrid relevance、連想経由は実コサイン(vec_sim に格納済み)
-            rel = relevances.get(id_, vec_sim.get(id_, min_vec_sim))
-            if via == "associative":
-                # 連想経由ノードはクエリとの直接類似が低いからこそリンクで
-                # 辿られている。強いリンクで繋がっていること自体が関連性の
-                # 証拠なので、拡散活性化の伝播スコアで関連度を底上げする
-                # (これが無いと連想記憶がノイズに埋もれて永久に出てこない)
-                rel = max(rel, spread_scores.get(id_, 0.0))
             score = dynamics.final_score(
-                rel, act, imp,
+                rel_norm[id_], act, imp,
                 w_relevance=s.w_relevance,
                 w_activation=s.w_activation,
                 w_importance=s.w_importance,
