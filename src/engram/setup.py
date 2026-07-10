@@ -290,11 +290,21 @@ def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, s
 # エージェント登録: Codex
 # ---------------------------------------------------------------------------
 
+# Codex の MCP 初期接続タイムアウト既定値(30秒)では、engram の起動
+# (埋め込みモデル約529MBの読込+記憶フォルダ確認)が間に合わないことがある
+# (実機で接続失敗が発生)。登録時に起動待ち時間を明示して回避する
+_CODEX_STARTUP_TIMEOUT_SEC = "120.0"
+
+
 def register_codex(
     codex_config_path: Path,
     engram_mcp_path: Path,
 ) -> tuple[bool, str]:
-    """~/.codex/config.toml に engram MCP ブロックを追記する。冪等。"""
+    """~/.codex/config.toml に engram MCP ブロックを追記する。冪等。
+
+    登録済みブロックに startup_timeout_sec が無ければ追記する
+    (旧バージョンで登録したユーザーも setup 再実行だけで直る)。
+    """
     try:
         import re
 
@@ -305,19 +315,47 @@ def register_codex(
         mcp_path_str = str(engram_mcp_path).replace("\\", "/")
         if "[mcp_servers.engram]" in existing:
             # 登録済みでもパスが古い(再インストールで場所が変わった等)場合は
-            # 更新する。壊れたパスのまま残すと接続不能になる(実機で発生)
-            pattern = r"(\[mcp_servers\.engram\]\s*\r?\ncommand = ')([^']*)(')"
+            # 更新する。壊れたパスのまま残すと接続不能になる(実機で発生)。
+            # Codex 本体が config.toml を書き直すと引用符が二重引用符に
+            # 変わることがあるため、両方の引用符を受け付ける
+            pattern = (
+                r"(\[mcp_servers\.engram\]\s*\r?\ncommand = )(['\"])([^'\"\r\n]*)\2"
+            )
             m = re.search(pattern, existing)
-            if m and m.group(2) == mcp_path_str:
+            if not m:
+                return True, "既追記済み(手動編集を検出したため変更せず)"
+            updated = existing
+            actions = []
+            if m.group(3) != mcp_path_str:
+                updated = re.sub(
+                    pattern,
+                    lambda mm: f"{mm.group(1)}{mm.group(2)}{mcp_path_str}{mm.group(2)}",
+                    updated,
+                )
+                actions.append("パスを更新")
+            # engram ブロック本体(次のセクション見出しまで)に起動待ち時間が
+            # 無ければ command 行の直後に追記する
+            block = re.search(
+                r"\[mcp_servers\.engram\]\r?\n(?:(?!\[).*\r?\n?)*", updated
+            )
+            if block and "startup_timeout_sec" not in block.group(0):
+                updated = re.sub(
+                    r"(\[mcp_servers\.engram\]\s*\r?\ncommand = ['\"][^'\"\r\n]*['\"]\r?\n)",
+                    lambda mm: (
+                        f"{mm.group(1)}"
+                        f"startup_timeout_sec = {_CODEX_STARTUP_TIMEOUT_SEC}\n"
+                    ),
+                    updated,
+                )
+                actions.append("起動待ち時間を追加")
+            if not actions:
                 return True, "既追記済み(スキップ)"
-            if m:
-                updated = re.sub(pattern, rf"\g<1>{mcp_path_str}\g<3>", existing)
-                codex_config_path.write_text(updated, encoding="utf-8")
-                return True, "パスを更新"
-            return True, "既追記済み(手動編集を検出したため変更せず)"
+            codex_config_path.write_text(updated, encoding="utf-8")
+            return True, "・".join(actions)
         addition = (
             f"\n[mcp_servers.engram]\n"
             f"command = '{mcp_path_str}'\n"
+            f"startup_timeout_sec = {_CODEX_STARTUP_TIMEOUT_SEC}\n"
         )
         with codex_config_path.open("a", encoding="utf-8") as f:
             f.write(addition)
