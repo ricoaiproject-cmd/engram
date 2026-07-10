@@ -7,6 +7,7 @@ ENGRAM_HOME を tmp_path に monkeypatch して純粋ロジックをテストす
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -320,16 +321,20 @@ class TestCodexConfig:
         assert ok
         content = codex_cfg.read_text(encoding="utf-8")
         assert "[mcp_servers.engram]" in content
+        # 既定30秒では起動が間に合わないことがあるため必ず明示する
+        assert "startup_timeout_sec = 120.0" in content
 
     def test_idempotent_if_already_registered(self, tmp_path):
-        """同じパスで登録済みならスキップ。"""
+        """同じパスで登録済み(起動待ち時間も設定済み)ならスキップ。"""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
         same_path = str(fake_mcp).replace("\\", "/")
         codex_cfg = tmp_path / ".codex" / "config.toml"
         codex_cfg.parent.mkdir(parents=True, exist_ok=True)
         codex_cfg.write_text(
-            f"[mcp_servers.engram]\ncommand = '{same_path}'\n", encoding="utf-8"
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"startup_timeout_sec = 120.0\n",
+            encoding="utf-8",
         )
 
         ok, msg = register_codex(codex_cfg, fake_mcp)
@@ -337,6 +342,56 @@ class TestCodexConfig:
         assert "スキップ" in msg
         content = codex_cfg.read_text(encoding="utf-8")
         # 重複追加されていないこと
+        assert content.count("[mcp_servers.engram]") == 1
+        assert content.count("startup_timeout_sec") == 1
+
+    def test_timeout_added_to_legacy_entry(self, tmp_path):
+        """旧バージョンで登録された(起動待ち時間なし)ブロックには追記する。
+        実機で発生: Codex 既定の初期接続30秒では engram の起動
+        (モデル読込+記憶フォルダ確認)が間に合わず接続タイムアウトした。"""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"\n[mcp_servers.engram.tools.recall]\napproval_mode = 'auto'\n",
+            encoding="utf-8",
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "起動待ち時間" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        assert "startup_timeout_sec = 120.0" in content
+        # command 行の直後(ブロック内)に入っていること
+        assert re.search(
+            r"\[mcp_servers\.engram\]\ncommand = '[^']*'\nstartup_timeout_sec = 120\.0\n",
+            content,
+        )
+        # tools サブセクション等の他の設定は無傷
+        assert "[mcp_servers.engram.tools.recall]" in content
+        assert content.count("startup_timeout_sec") == 1
+
+    def test_timeout_added_to_double_quoted_entry(self, tmp_path):
+        """Codex 本体が config.toml を書き直すと引用符が二重引用符に変わる
+        ことがある(実機で確認)。その形式のブロックにも追記できる。"""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f'[mcp_servers.engram]\ncommand = "{same_path}"\n', encoding="utf-8"
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "起動待ち時間" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        assert "startup_timeout_sec = 120.0" in content
+        assert f'command = "{same_path}"' in content  # 引用符スタイルは維持
         assert content.count("[mcp_servers.engram]") == 1
 
     def test_stale_path_is_updated(self, tmp_path):

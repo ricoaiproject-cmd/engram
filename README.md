@@ -445,6 +445,31 @@ tests/
 
 ---
 
+## Troubleshooting
+
+### Codex says engram is enabled but the connection times out on startup
+
+engram loads a ~529MB embedding model (plus checks the memories folder) on
+every startup, which can take longer than Codex's default 30-second MCP
+startup timeout — especially right after a reboot, during antivirus scans, or
+when the memories folder lives on a cloud-synced drive (Google Drive, OneDrive,
+etc.). Your memories are fine; only the initial connection is timing out.
+
+Newer versions of `engram setup` write a longer startup timeout automatically.
+If you registered with an older version, either re-run
+`engram setup --agents codex`, or add one line to the engram block in
+`~/.codex/config.toml` yourself:
+
+```toml
+[mcp_servers.engram]
+command = "..."                # leave as is
+startup_timeout_sec = 120.0    # add this line
+```
+
+Then fully restart Codex (quit and relaunch, not just close the window).
+
+---
+
 ## Update
 
 Re-run the same one-line installer to overwrite with the latest version:
