@@ -351,12 +351,24 @@ def _preload() -> None:
             )
 
 
+def _resolve_preload_mode(raw: str | None, onnx_ready: bool) -> str:
+    """ENGRAM_PRELOAD の値を実際の先読み方式に解決する(純粋関数・テスト対象)。
+
+    blocking / background / off の明示値はそのまま。auto(既定)および未知の値は、
+    ONNX モデルが生成済みなら background、torch フォールバック環境なら blocking。
+    根拠は main() 冒頭のコメントを参照。
+    """
+    mode = (raw or "auto").strip().lower()
+    if mode in ("blocking", "background", "off"):
+        return mode
+    return "background" if onnx_ready else "blocking"
+
+
 def main() -> None:
     """stdio MCP サーバーを起動する。"""
-    # 【v0.6.0〜】既定の実行系は ONNX(embed_backend=auto + export-onnx 済み)で、
-    # import+モデルロードは1〜2秒。以下の病理は torch 経路(ONNX 未生成の
-    # フォールバック)にのみ該当するが、そこに戻ると何が起きるかの記録として残す。
-    # blocking 既定は ONNX でも無害(先読みが軽いだけ)なので変更しない。
+    # 【v0.6.0〜】既定の実行系は ONNX(embed_backend=auto + export-onnx 済み)。
+    # 以下の torch 病理の記録は、ONNX 未生成のフォールバック環境に戻ると
+    # 何が起きるかの記録として残す。
     #
     # torch / sentence_transformers の import は非常に重い(実測: import だけで
     # cold 50秒超)。これを mcp.run() の前にメインスレッドで実行すると initialize
@@ -373,24 +385,40 @@ def main() -> None:
     # ため、ループとの GIL/DLL ローダー競合とみられる。教訓: 重い import は
     # イベントループが動き出す前にメインスレッドで済ませるのが唯一速い経路。
     #
-    # ENGRAM_PRELOAD で先読み方式を選ぶ:
-    #   blocking (既定)  — 起動時にメインスレッドで先読み。ハンドシェイクは import
-    #                     完了まで待つ(warm 12〜24秒 / cold 50秒超)ため、クライアント
-    #                     側の MCP 起動タイムアウトを 120 秒以上にすること(Claude
-    #                     Code は settings.json の env で MCP_TIMEOUT=120000)。
-    #                     接続後の recall は常に即応答する。
+    # 【v0.10.0〜】上記の病理が ONNX 経路には無いことを実測で確認した
+    # (2026-07-12: イベントループ稼働中のデーモンスレッドでの embedder ロードが
+    # 4.9秒 — メインスレッド 4.7秒とほぼ同じ。184秒級への劣化は torch の
+    # DLL ローダー固有)。そこで既定を auto にし、ONNX モデルが生成済みなら
+    # background(ハンドシェイク即応答・初回ツールは最大でも数秒待ち)、
+    # torch フォールバック環境では従来どおり blocking を選ぶ。
+    # 背景: 起動タイムアウトを延ばす設定が効かない MCP クライアントが実在する
+    # (実例: Codex Desktop 26.707 は startup_timeout_sec=120 を認識しつつ
+    # blocking の十数秒を待たず、初期化未完了のまま張り付いた)。
+    #
+    # ENGRAM_PRELOAD で先読み方式を明示できる:
+    #   auto (既定)      — ONNX 生成済みなら background、無ければ blocking。
+    #   blocking        — 起動時にメインスレッドで先読み。ハンドシェイクは import
+    #                     完了まで待つ(torch 経路では warm 12〜24秒 / cold 50秒超の
+    #                     ため、クライアント側の MCP 起動タイムアウトを 120 秒以上に
+    #                     すること。Claude Code は settings.json の env で
+    #                     MCP_TIMEOUT=120000)。接続後の recall は常に即応答する。
     #   background      — 先読みをデーモンスレッドに回し、mcp.run() を即実行する。
-    #                     ハンドシェイクは即応答するが、上記の病理により Windows では
-    #                     初回 recall が 3 分級になりうる。起動タイムアウトを一切
-    #                     延ばせないクライアント向けの妥協案。
+    #                     ONNX 経路では安全(初回ツールが先読み完了を数秒待つだけ)。
+    #                     torch 経路では上記の病理により Windows で初回 recall が
+    #                     3 分級になりうるので明示指定は非推奨。
     #   off             — 先読みしない。初回ツール呼び出し時に遅延ロードする
-    #                     (background と同じ病理を踏む)。
+    #                     (torch 経路では background と同じ病理を踏む)。
     # FastMCP は同期ツールをワーカースレッドで実行するため、_get_engine と
     # RuriEmbedder._load はロックで多重ロードを防いでいる。
-    mode = os.environ.get("ENGRAM_PRELOAD", "blocking").strip().lower()
+    from .config import get_settings, onnx_model_ready
+
+    mode = _resolve_preload_mode(
+        os.environ.get("ENGRAM_PRELOAD"),
+        onnx_model_ready(get_settings().onnx_model_dir),
+    )
     if mode == "blocking":
         _preload()
-    elif mode != "off":
+    elif mode == "background":
         threading.Thread(
             target=_preload, name="engram-preload", daemon=True
         ).start()

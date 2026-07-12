@@ -153,6 +153,21 @@ class Settings:
         return self.data_dir / "onnx" / self.embed_model.replace("/", "--")
 
 
+def onnx_model_ready(model_dir: Path) -> bool:
+    """export-onnx 済みの ONNX モデル一式が揃っているか(ファイル存在チェックのみ)。
+
+    embedder.OnnxRuriEmbedder.is_available の実体。server 起動直後の
+    ENGRAM_PRELOAD=auto 判定でも使うため、numpy 等の重い import を伴う
+    embedder モジュールではなく、軽量なこのモジュールに置く。
+    """
+    d = Path(model_dir)
+    return (
+        (d / "model.onnx").is_file()
+        and (d / "tokenizer.json").is_file()
+        and (d / "meta.json").is_file()
+    )
+
+
 def config_path() -> Path:
     """ユーザー設定ファイルの場所(engram setup が生成する)。"""
     return _engram_home() / "config.toml"

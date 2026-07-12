@@ -141,12 +141,10 @@ class OnnxRuriEmbedder:
 
     @classmethod
     def is_available(cls, model_dir: Path) -> bool:
-        d = Path(model_dir)
-        return (
-            (d / "model.onnx").is_file()
-            and (d / "tokenizer.json").is_file()
-            and (d / "meta.json").is_file()
-        )
+        # 実体は config.onnx_model_ready(軽量 import で使えるようそちらに置く)
+        from .config import onnx_model_ready
+
+        return onnx_model_ready(model_dir)
 
     def _load_meta(self) -> dict:
         if self._meta is None:
