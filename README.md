@@ -163,20 +163,23 @@ errors if not exported), `torch` (forced fallback).
 
 ### Startup mode (`ENGRAM_PRELOAD`)
 
-With the ONNX backend the preload is cheap and the default `blocking` needs no
-tuning. The numbers below describe the **torch fallback** (no ONNX model
-exported yet) — kept because they explain why the design looks like this. The
-`ENGRAM_PRELOAD` environment variable controls when the model load happens:
+The default is `auto` (v0.10.0+): if the ONNX model has been exported, engram
+picks `background` (handshake responds immediately); on the torch fallback it
+picks `blocking`. No tuning is normally needed, and clients whose MCP startup
+timeout settings have no effect (seen in the wild: Codex Desktop 26.707)
+connect out of the box.
 
 | Value | Behavior |
 |---|---|
-| `blocking` (default) | Load the model on the main thread before answering the handshake (~12–24 s warm, 50+ s cold). Every `recall` after connect responds instantly. Raise your client's MCP startup timeout to 120 s or more (for Claude Code: `MCP_TIMEOUT=120000`). |
-| `background` | Respond to the handshake immediately and load the model in a background thread. **Caution:** on Windows, importing torch on a non-main thread while the asyncio event loop is running is pathologically slow (measured ~184 s vs ~20 s on the main thread), so the first `recall` can exceed the client's tool timeout. Use only if you cannot raise the startup timeout at all. |
-| `off` | No preload; the model loads lazily on the first tool call (hits the same slow-thread-import path as `background`). |
+| `auto` (default) | `background` if the ONNX model is exported, else `blocking`. |
+| `blocking` | Load the model on the main thread before answering the handshake. Every `recall` after connect responds instantly. On the torch path this takes ~12–24 s warm / 50+ s cold, so raise your client's MCP startup timeout to 120 s or more (for Claude Code: `MCP_TIMEOUT=120000`). |
+| `background` | Respond to the handshake immediately and load the model in a background thread. Safe on the ONNX path (the first tool call just waits a few seconds; measured ~5 s even off the main thread). **Not recommended on the torch path:** on Windows, importing torch on a non-main thread while the asyncio event loop is running is pathologically slow (measured ~184 s vs ~20 s on the main thread), so the first `recall` can exceed the client's tool timeout. |
+| `off` | No preload; the model loads lazily on the first tool call. |
 
-If engram fails to connect at startup, raise the client's MCP startup timeout
-(for Claude Code: `MCP_TIMEOUT=120000`) rather than switching to `background` —
-that only converts a visible startup timeout into a 3-minute first `recall`.
+If engram fails to connect at startup on the torch fallback, raise the client's
+MCP startup timeout (for Claude Code: `MCP_TIMEOUT=120000`) or run
+`engram export-onnx`, rather than forcing `background` — on torch that only
+converts a visible startup timeout into a 3-minute first `recall`.
 
 ---
 
