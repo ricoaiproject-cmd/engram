@@ -123,9 +123,12 @@ engram setup --agents claude,codex
 有効な名前: `claude` / `codex` / `gemini`(`antigravity` は `gemini` の別名)。
 `--agents` を省略した場合、対話モード(インタラクティブ)では検出されたエージェントが一覧表示され、番号で選べます。Enter を押すとすべてに登録されます。`--non-interactive` では従来どおり検出された全エージェントに自動登録されます。
 
-### ONNX による起動高速化(v0.6 の新機能)
+### ONNX による起動高速化
 
-一度だけ実行してください:
+v0.11 からは `engram setup`(1行インストーラが最後に自動実行します)が
+ONNX 変換まで自動で行うため、**手動での操作は不要**です。変換済みなら
+スキップされます(冪等)。埋め込みモデルを変更した後などに再変換したい
+場合だけ、手動コマンドを使ってください:
 
 ```powershell
 engram export-onnx
@@ -447,8 +450,10 @@ macOS / Linux:
 curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
 ```
 
-`uv tool upgrade engram` でも同じです。
+`uv tool upgrade engram` でも同じです(こちらは本体の更新のみ)。
 
+- 1行版は更新後にセットアップも自動で走るため、ONNX 未変換の環境なら
+  変換まで済み、起動が約2秒になります(変換済みならスキップ)
 - 記憶・設定(`~/.engram` と記憶フォルダ)はそのまま残ります。消えません
 - 更新後は、engram を使う各エージェント(Claude Code 等)を再起動してください(MCP サーバーの再接続に必要)
 

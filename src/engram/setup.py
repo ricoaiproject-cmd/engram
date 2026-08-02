@@ -657,6 +657,26 @@ def setup_main(
         results.append(("埋め込みモデル取得", False, str(e)))
         print(f"  警告: モデル取得に失敗しました({e})")
         print("  サーバー初回起動時に再試行されます。")
+
+    # ONNX 変換(初回のみ・冪等)。手動の `engram export-onnx` を不要にする。
+    # モデル取得に失敗している場合は試みない(embedder is None)。
+    if embedder is not None:
+        try:
+            from .config import onnx_model_ready
+            settings = get_settings()
+            if onnx_model_ready(settings.onnx_model_dir):
+                results.append(("ONNX変換", True, "変換済み(スキップ)"))
+                print("  ONNX変換: 変換済み(スキップ)")
+            else:
+                print("  起動を高速化するため、モデルをONNX形式へ変換します(初回のみ・数分かかります)...")
+                from .onnx_export import export_onnx
+                export_onnx(settings)
+                results.append(("ONNX変換", True, "完了"))
+                print("  ONNX変換が完了しました(以後の起動は約2秒になります)")
+        except Exception as e:
+            results.append(("ONNX変換", False, str(e)))
+            print(f"  警告: ONNX変換に失敗しました({e})")
+            print("  変換なしでも動作します(起動が遅い場合は後で engram export-onnx を実行してください)")
     print()
 
     # ------------------------------------------------------------------

@@ -798,3 +798,84 @@ class TestSummarizePerf:
         log.write_text("garbage\nmore garbage\n", encoding="utf-8")
         status, detail = summarize_perf(log)
         assert status == "[--]"
+
+
+# ---------------------------------------------------------------------------
+# setup_main の ONNX 自動変換(Step 4 内)
+# ---------------------------------------------------------------------------
+
+class TestSetupMainOnnxExport:
+    """ONNX 自動変換の分岐(未変換なら実行・変換済みならスキップ・失敗しても続行)。"""
+
+    class _FakeEmbedder:
+        dim = 8
+
+        def embed_query(self, text):
+            import numpy as np
+            return np.zeros(8, dtype=np.float32)
+
+        def embed_docs(self, texts):
+            import numpy as np
+            return np.zeros((len(texts), 8), dtype=np.float32)
+
+    def _run(self, tmp_path, monkeypatch, *, ready, export_raises=False):
+        import engram.setup as setup_mod
+        import engram.embedder as emb_mod
+        import engram.config as cfg_mod
+        import engram.onnx_export as onnx_mod
+
+        monkeypatch.setenv("ENGRAM_HOME", str(tmp_path / "engram_home"))
+        monkeypatch.setattr(setup_mod.shutil, "which", lambda *a, **kw: None)
+        mcp = tmp_path / "engram-mcp.exe"
+        mcp.write_bytes(b"")
+        monkeypatch.setattr(setup_mod, "get_engram_mcp_path", lambda: mcp)
+        monkeypatch.setattr(emb_mod, "RuriEmbedder", lambda: self._FakeEmbedder())
+        monkeypatch.setattr(cfg_mod, "onnx_model_ready", lambda d: ready)
+
+        calls = []
+
+        def fake_export(settings, **kw):
+            calls.append(settings)
+            if export_raises:
+                raise RuntimeError("conversion failed")
+            return {"ok": True}
+
+        monkeypatch.setattr(onnx_mod, "export_onnx", fake_export)
+
+        engram_home = tmp_path / "engram_home"
+        engram_home.mkdir(parents=True, exist_ok=True)
+        codex_dir = tmp_path / "codex"
+        codex_dir.mkdir()
+        gemini_dir = tmp_path / "gemini"
+        (gemini_dir / "config").mkdir(parents=True)
+        setup_main(
+            memories_dir=tmp_path / "memories",
+            non_interactive=True,
+            agents={"codex"},
+            engram_home=engram_home,
+            config_file=engram_home / "config.toml",
+            claude_md_path=tmp_path / "claude_md" / "CLAUDE.md",
+            codex_dir=codex_dir,
+            gemini_dir=gemini_dir,
+        )
+        return calls
+
+    def test_exports_when_missing(self, tmp_path, monkeypatch, capsys):
+        """未変換なら export_onnx が1回呼ばれること。"""
+        calls = self._run(tmp_path, monkeypatch, ready=False)
+        assert len(calls) == 1
+        assert "ONNX変換が完了しました" in capsys.readouterr().out
+
+    def test_skips_when_already_exported(self, tmp_path, monkeypatch, capsys):
+        """変換済みなら export_onnx を呼ばずスキップと表示すること(冪等)。"""
+        calls = self._run(tmp_path, monkeypatch, ready=True)
+        assert calls == []
+        assert "変換済み(スキップ)" in capsys.readouterr().out
+
+    def test_failure_does_not_abort_setup(self, tmp_path, monkeypatch, capsys):
+        """変換が失敗しても警告のみでセットアップが最後まで進むこと。"""
+        calls = self._run(tmp_path, monkeypatch, ready=False, export_raises=True)
+        out = capsys.readouterr().out
+        assert len(calls) == 1
+        assert "警告: ONNX変換に失敗しました" in out
+        assert "[6/6] 動作確認" in out
