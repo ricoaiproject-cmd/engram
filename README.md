@@ -1,3 +1,5 @@
+[English version → engram-en](https://github.com/ricoaiproject-cmd/engram-en)（準備中 / coming soon）
+
 # engram — AIエージェント用 人間型記憶基盤(MCPサーバー)
 
 Claude Code / Codex / Antigravity(Gemini CLI)が共有する永続記憶。
