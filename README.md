@@ -1,4 +1,4 @@
-[English version → engram-en](https://github.com/ricoaiproject-cmd/engram-en)（準備中 / coming soon）
+[English version → engram-global](https://github.com/ricoaiproject-cmd/engram-global)（準備中 / coming soon）
 
 # engram — AIエージェント用 人間型記憶基盤(MCPサーバー)
 
