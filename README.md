@@ -1,23 +1,15 @@
-**English** | [日本語](README.ja.md)
+# engram — AIエージェント用 人間型記憶基盤(MCPサーバー)
 
-# engram — Human-like memory for AI agents (MCP server)
-
-Persistent memory shared by Claude Code, Codex, and Antigravity (Gemini CLI).
-The more a memory is used, the easier it is to recall; unused memories sink
-but never disappear — the same dynamics as human memory.
-
-> Note: the setup wizard and CLI messages are currently in Japanese, and the
-> default embedding model (Ruri-v3) is Japanese-focused. The engine itself is
-> language-agnostic; you can switch models with `embed_model` in
-> `~/.engram/config.toml` (re-run `engram reindex` after changing it).
+Claude Code / Codex / Antigravity(Gemini CLI)が共有する永続記憶。
+使うほど思い出しやすくなり、使わない記憶は沈むが消えない — 人間の記憶と同じ性質を持つ。
 
 ---
 
-## Quick start
+## クイックスタート(受け取った方へ)
 
-### Option 1: one-line install
+### 方法1: 一発インストール
 
-Windows (PowerShell):
+Windows(PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
@@ -29,195 +21,180 @@ macOS / Linux:
 curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
 ```
 
-This single line installs uv, installs engram, and runs the setup wizard.
-(macOS: git is required — run `xcode-select --install` first if you don't
-have it.)
+これ1行で uv のインストール・engram のインストール・セットアップウィザードまで実行されます。
+(macOS は git が必要です。無い場合は先に `xcode-select --install` を実行してください)
 
-### Option 2: manual install in three commands
+### 方法2: 3コマンドで手動インストール
 
-Windows (PowerShell):
+Windows(PowerShell):
 
 ```powershell
-# 1. Install uv (skip if you already have it)
+# 1. uv をインストール(既にある場合はスキップ)
 irm https://astral.sh/uv/install.ps1 | iex
 
-# 2. Install engram
+# 2. engram をインストール
 uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
 
-# 3. Run the setup wizard
+# 3. セットアップウィザードを実行
 engram setup
 ```
 
 macOS / Linux:
 
 ```bash
-# 1. Install uv (skip if you already have it)
+# 1. uv をインストール(既にある場合はスキップ)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Install engram (force a uv-managed Python — see note below)
+# 2. engram をインストール(uv 管理の Python を強制 — 下の注記参照)
 UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
 
-# 3. Run the setup wizard
+# 3. セットアップウィザードを実行
 engram setup
 ```
 
-> Why a uv-managed Python? engram needs a Python whose SQLite supports
-> loadable extensions (for sqlite-vec). uv-managed Python provides this;
-> system / python.org builds on macOS do not, and uv would otherwise prefer
-> them when present — hence `UV_PYTHON_PREFERENCE=only-managed` (install.sh
-> sets it for you). `engram doctor` has a check row for this.
+> なぜ uv 管理の Python? engram は SQLite の拡張ロード(sqlite-vec が使用)に
+> 対応した Python を必要とします。macOS 標準や python.org の Python は非対応で、
+> しかも存在すると uv はそちらを優先してしまうため、
+> `UV_PYTHON_PREFERENCE=only-managed` で uv 管理の Python を強制します
+> (install.sh は自動で設定します)。`engram doctor` に確認項目があります。
 
-The setup wizard automatically:
-- creates the config file (`~/.engram/config.toml`)
-- initializes the memory folder
-- downloads the embedding model (first run only, ~500 MB)
-- registers engram with Claude Code / Codex / Antigravity
-- registers the hooks for auto-encoding and proactive recall (Claude Code)
+セットアップウィザードが以下を自動で行います:
+- 設定ファイル(`~/.engram/config.toml`)の作成
+- 記憶フォルダの初期化
+- 埋め込みモデルのダウンロード(初回のみ、約500MB)
+- Claude Code / Codex / Antigravity への自動登録
+- フック(自動符号化・自発的想起)の登録(Claude Code)
 
 ---
 
-## After installation
+## インストール後の使い方
 
-### Just talk to your agent
+### エージェントに話しかけるだけ
 
-Your agent performs every engram operation on its own. You simply have normal
-conversations, and memories accumulate and get used automatically.
+engram のすべての操作はエージェントが自動的に行います。
+ユーザーは普通に会話するだけで記憶が蓄積・活用されます。
 
-### Take the onboarding interview first (recommended)
+### 最初にオンボーディングインタビューを受ける(推奨)
 
-Ask your agent:
+エージェントに次のように依頼してください:
 
 ```
-Read ~/.engram/ONBOARDING.md and interview me.
+~/.engram/ONBOARDING.md を読んで、私にインタビューして。
 ```
 
-Seeding your working style, preferences, and background makes the memory
-useful from day one.
+仕事の流儀・好み・背景情報を初期登録することで、すぐに記憶が活きはじめます。
 
-### Check your environment
+### 環境の確認
 
 ```powershell
 engram doctor
 ```
 
-Shows Python version, config file, model cache, embedding backend
-(ONNX / torch), install health (detects leftover `~ngram`-style remnants of a
-failed pip reinstall that break `import engram`), per-agent registration
-status as `[OK]` / `[NG]` / `[--]`, FTS5 availability (whether SQLite's
-full-text search extension is loaded, since keyword search silently degrades
-without it), and a perf summary section that surfaces recent MCP tool-call
-and startup timings recorded to `data_dir/perf/perf_log.jsonl` (see below) so
-a "something feels slow" complaint can be diagnosed from data rather than
-guesswork.
+Python バージョン・設定ファイル・モデルキャッシュ・埋め込み実行系(ONNX / torch)・
+インストール健全性(pip 再インストール失敗の残骸 `~ngram` 等による import 不能の検知)・
+各エージェントへの登録状況を `[OK]` / `[NG]` / `[--]` で一覧表示するほか、
+FTS5(SQLite の全文検索拡張)が読み込めているか(欠けるとキーワード検索が
+黙って劣化するため)と、`data_dir/perf/perf_log.jsonl`(下記)に記録された
+直近の MCP ツール呼び出し・起動時間の要約行も表示します。
+「なんとなく遅い」を勘ではなくデータで診断できます。
 
-### Re-run setup (e.g. after installing a new agent)
+### 再セットアップ(新しいエージェントをインストールした後など)
 
 ```powershell
 engram setup
 ```
 
-Safe to run any number of times (idempotent). Only unregistered agents are
-added.
+何度実行しても安全(冪等)です。未登録のエージェントだけが追加されます。
 
-### Choose which agents to register
+### 登録先のエージェントを選ぶ
 
-Even with multiple agents installed, you can connect engram to just the ones
-you want.
+複数のエージェントが入っていても、engram を繋ぎたいものだけを選べます。
 
 ```powershell
-# Register with Claude Code only
+# Claude Code だけに登録する
 engram setup --agents claude
 
-# Register with both Claude Code and Codex
+# Claude Code と Codex の両方に登録する
 engram setup --agents claude,codex
 ```
 
-Valid names: `claude` / `codex` / `gemini` (`antigravity` is an alias for
-`gemini`). Without `--agents`, interactive mode lists the detected agents and
-lets you pick by number (Enter selects all); `--non-interactive` registers all
-detected agents as before.
+有効な名前: `claude` / `codex` / `gemini`(`antigravity` は `gemini` の別名)。
+`--agents` を省略した場合、対話モード(インタラクティブ)では検出されたエージェントが一覧表示され、番号で選べます。Enter を押すとすべてに登録されます。`--non-interactive` では従来どおり検出された全エージェントに自動登録されます。
 
-### Faster startup with ONNX (new in v0.6)
+### ONNX による起動高速化(v0.6 の新機能)
 
-Run this once:
+一度だけ実行してください:
 
 ```powershell
 engram export-onnx
 ```
 
-This converts the embedding model to ONNX (no extra dependencies — the
-already-installed torch does the one-time conversion) and the server starts
-using it automatically (`embed_backend=auto`). Startup drops from 12–24 s
-(torch import) to **~2 s**, and no MCP client timeout tuning is needed
-anymore.
+埋め込みモデルを ONNX に変換します(追加の依存は不要 — 変換はインストール済みの
+torch が一度だけ担当)。以後サーバーは自動的に ONNX を使い(`embed_backend=auto`)、
+起動が 12〜24秒(torch import)から **約2秒** になります。MCP クライアント側の
+タイムアウト調整も不要になります。
 
-Safety: the export verifies that the ONNX embeddings match the torch path on
-a set of sample texts (min cosine ≥ 0.999, including a long text that crosses
-ModernBERT's sliding-window boundary) and refuses to install a drifted model —
-a silently drifted embedding space would corrupt recall against your existing
-`index.db`.
+安全装置: 変換時に torch 経路と ONNX 経路で同じサンプル文(ModernBERT の
+スライディングウィンドウ境界を越える長文を含む)を埋め込み、コサイン類似の
+最小値が 0.999 を下回るモデルはインストールを拒否します — 分布がずれた
+埋め込み空間を黙って採用すると、既存の `index.db` に対する recall が静かに
+壊れるためです。
 
-`embed_backend` in `config.toml` (or `ENGRAM_EMBED_BACKEND`) selects the
-runtime: `auto` (default; ONNX if exported, else torch), `onnx` (forced;
-errors if not exported), `torch` (forced fallback).
+`config.toml` の `embed_backend`(または環境変数 `ENGRAM_EMBED_BACKEND`)で
+実行系を選べます: `auto`(既定。ONNX 生成済みならそれを使い、無ければ torch)/
+`onnx`(強制。未生成ならエラー)/ `torch`(フォールバックを強制)。
 
-### Startup mode (`ENGRAM_PRELOAD`)
+### 起動モード(`ENGRAM_PRELOAD`)
 
-The default is `auto` (v0.10.0+): if the ONNX model has been exported, engram
-picks `background` (handshake responds immediately); on the torch fallback it
-picks `blocking`. No tuning is normally needed, and clients whose MCP startup
-timeout settings have no effect (seen in the wild: Codex Desktop 26.707)
-connect out of the box.
+既定は `auto` です(v0.10.0〜): ONNX モデルが生成済みなら `background`
+(ハンドシェイク即応答)、torch フォールバック環境なら `blocking` を自動選択
+するため、通常は調整不要です。MCP の起動タイムアウト設定が効かないクライアント
+(実例: Codex Desktop 26.707)でもそのまま接続できます。
 
-| Value | Behavior |
+| 値 | 挙動 |
 |---|---|
-| `auto` (default) | `background` if the ONNX model is exported, else `blocking`. |
-| `blocking` | Load the model on the main thread before answering the handshake. Every `recall` after connect responds instantly. On the torch path this takes ~12–24 s warm / 50+ s cold, so raise your client's MCP startup timeout to 120 s or more (for Claude Code: `MCP_TIMEOUT=120000`). |
-| `background` | Respond to the handshake immediately and load the model in a background thread. Safe on the ONNX path (the first tool call just waits a few seconds; measured ~5 s even off the main thread). **Not recommended on the torch path:** on Windows, importing torch on a non-main thread while the asyncio event loop is running is pathologically slow (measured ~184 s vs ~20 s on the main thread), so the first `recall` can exceed the client's tool timeout. |
-| `off` | No preload; the model loads lazily on the first tool call. |
+| `auto`(既定) | ONNX 生成済みなら `background`、無ければ `blocking`。 |
+| `blocking` | ハンドシェイク前にメインスレッドでモデルを読み込む。接続後の `recall` は常に即応答。torch 経路では warm 12〜24秒 / cold 50秒超かかるため、クライアント側の MCP 起動タイムアウトを120秒以上に延長すること(Claude Code なら `MCP_TIMEOUT=120000`)。 |
+| `background` | ハンドシェイクに即応答し、モデルは裏スレッドで読み込む。ONNX 経路では安全(初回ツールが読み込み完了を数秒待つだけ。実測: 別スレッドでも約5秒)。**torch 経路では非推奨:** Windows では asyncio イベントループ稼働中の別スレッド torch import が病的に遅く(実測: メインスレッド約20秒 → 別スレッド約184秒)、初回 `recall` がクライアントのツールタイムアウトを超えうる。 |
+| `off` | 先読みしない。初回ツール呼び出し時に遅延ロードする。 |
 
-If engram fails to connect at startup on the torch fallback, raise the client's
-MCP startup timeout (for Claude Code: `MCP_TIMEOUT=120000`) or run
-`engram export-onnx`, rather than forcing `background` — on torch that only
-converts a visible startup timeout into a 3-minute first `recall`.
+torch フォールバック環境で起動時に接続失敗する場合は、`background` に切り替えるのではなく、クライアント側の MCP 起動タイムアウトを延長するか、`engram export-onnx` で ONNX モデルを生成してください(torch での `background` は「見える起動タイムアウト」を「初回 recall の3分ハング」に変換するだけです)。
 
 ---
 
-## More like real memory (new in v0.3)
+## もっと記憶らしく(v0.3 の新機能)
 
-### Auto-encoding — sessions become memories by themselves
+### 自動符号化 — セッションが勝手に記憶になる
 
-When a Claude Code session ends, a hook summarizes the conversation and saves
-it as an episode memory (`engram setup` registers the hook for you). Even if
-the agent forgets to call remember, "what we did yesterday" is preserved.
-Disable with `auto_encode = false` in `config.toml`.
+Claude Code のセッションが終わると、フックがその回のやり取りを要約して
+episode 記憶として自動保存します(`engram setup` でフックも自動登録)。
+remember を呼び忘れても「昨日何をしたか」が残ります。
+`config.toml` で `auto_encode = false` にすると無効化できます。
 
-### Proactive recall — memory speaks up on its own
+### 自発的想起 — 記憶のほうから思い出す
 
-Every time you say something, a hook runs a lightweight search (a fast path
-that never loads the embedding model) for related memories. The mode is set
-by `surface_mode` in `config.toml`:
+あなたが何か発言するたび、フックが軽量検索(埋め込みモデルは使わない高速経路)で
+関連記憶を探します。動作モードは `config.toml` の `surface_mode` で切替:
 
-| Mode | Behavior |
+| モード | 動作 |
 |---|---|
-| `shadow` (default) | Injects nothing; logs "this is what I would have surfaced" (for observation and tuning) |
-| `active` | Actually injects strongly related memories into the agent's context |
-| `off` | Does nothing |
+| `shadow`(初期値) | 差し込まず「差し込むならこれ」をログに記録(様子見・調整用) |
+| `active` | 関連が強い記憶をエージェントの文脈に実際に差し込む |
+| `off` | 何もしない |
 
-The log lives at `~/.engram/surface/surface_log.jsonl`. We recommend watching
-shadow mode for a while and switching to `active` once the surfaced candidates
-look right. Use `engram surface "some text"` to check manually what would
-surface.
+ログは `~/.engram/surface/surface_log.jsonl`。しばらく shadow で観察し、
+浮上候補が妥当になってから `active` に切り替える運用を推奨します。
+`engram surface "テキスト"` で何が浮上するかを手動確認できます。
 
-Tuning parameters: `surface_threshold` (score threshold, default 0.45) /
-`surface_min_relevance` (relevance floor, default 0.25 — a gate that keeps
-even important memories from surfacing when they are unrelated to what you
-said) / `surface_max_items` (max items per prompt, default 2).
+調整パラメータ: `surface_threshold`(浮上スコア閾値、初期値 0.45)/
+`surface_min_relevance`(関連度の最低ライン、初期値 0.25 — どれだけ重要な
+記憶でも発話と無関係なら浮上させないゲート)/
+`surface_max_items`(1回の最大件数、初期値 2)。
 
-### Memory rooms — separating work and personal contexts
+### 記憶の部屋 — 仕事と個人の文脈分離
 
-Every memory carries a `room` label. Map folders to rooms in `config.toml`
-and the room is resolved automatically from the working directory:
+記憶に `room`(部屋)ラベルが付きます。`config.toml` でフォルダと部屋を
+対応付けると、作業ディレクトリから自動判定されます:
 
 ```toml
 [room_paths]
@@ -225,105 +202,90 @@ and the room is resolved automatically from the working directory:
 'C:/Users/you/personal' = 'personal'
 ```
 
-- Unmapped folders and pre-existing memories are all `common`
-- recall searches only "current room + common" (`room="*"` searches across
-  all rooms)
-- Auto-encoding and proactive recall respect rooms too, so work memories
-  never leak into personal contexts (and vice versa)
+- 対応付けのないフォルダ・既存の記憶はすべて `common`(共通)
+- recall は「現在の部屋 + common」だけを検索(`room="*"` で全部屋横断)
+- 自動符号化・自発的想起も部屋を尊重するため、仕事の記憶が個人の文脈に
+  紛れ込まない(その逆も)
 
-### Sharing memories across machines
+### マシン間での記憶共有
 
-The Markdown store can live on a synced folder (e.g. a cloud drive) shared by
-several machines, but `index.db` is per-machine and local — so a memory written
-on one machine isn't searchable on another until that machine indexes it. The
-MCP server checks this at startup via `startup_index_check` in `config.toml`:
-`auto` (default) reindexes when it detects a markdown/index mismatch, `warn`
-logs a notice, `off` disables it. You can also run `engram reindex` any time.
+記憶の Markdown ストアはクラウド同期フォルダ等に置いて複数マシンで共有できますが、
+`index.db` はマシンごとにローカルです。そのため、あるマシンで書いた記憶は、別マシンが
+索引するまでそのマシンの recall に出てきません。MCP サーバーは起動時にこれを検知します
+(`config.toml` の `startup_index_check`): `auto`(既定)は Markdown と index の乖離を
+検知すると自動 reindex、`warn` は警告ログのみ、`off` は無効。手動で `engram reindex` も可。
 
 ---
 
-## How the memory works
+## 記憶の仕組み
 
-### Core design
+### 設計の核心
 
-Embeddings (where a memory sits in meaning-space) stay fixed; a separate
-axis — **activation** — modulates search ranking. Meaning = where it is,
-activation = how easily it comes to mind.
+埋め込み(意味の位置)は固定し、**活性度という別軸**で検索順位を変調します。
+意味=どこにあるか、活性度=どれだけ思い出しやすいか、を分離しています。
 
-### The same properties as human memory
+### 人間の記憶と同じ性質
 
-- **The more you use it, the easier it is to recall** — ACT-R activation
-  model; every use by the agent reinforces it automatically
-- **Unused memories sink but never disappear** — power-law decay; deep recall
-  can always reach them through associative links
-- **Memories from striking contexts are engraved deeply** — initial encoding
-  boost by importance + slower decay = flashbulb memory
-- **Corrected mistakes are engraved deepest of all** — the correct tool
-  records the error together with the fix = hypercorrection effect
+- **使うほど思い出しやすくなる** — ACT-R 活性化モデル。エージェントが使うたびに自動強化
+- **使わない記憶は沈むが消えない** — べき乗則の減衰。deep recall で連想リンクを辿れば必ず到達
+- **印象的な文脈の記憶は深く刻まれる** — importance による初期符号化ブースト + 低減衰 = フラッシュバルブ記憶
+- **訂正された誤りは最も深く刻まれる** — correct ツール。間違えた経験ごと記録 = ハイパーコレクション効果
 
-### Memory dynamics in brief
+### 記憶力学の要点
 
-- Activation: `B = ln(Σ w_j·(now−t_j)^(−d_i))`, normalized to 0..1 with a
-  sigmoid; computed on the fly from the access log
-- `d_i = clamp(0.5 − 0.2·(imp−5)/5, 0.3, 0.6)` — higher importance forgets
-  slower
-- create event weight `1 + 2·(imp/10)` — critical memories start strong
-- merely recalled: weight 0.3 / actually useful (reinforce): weight
-  1.0×strength
-- Memories reinforced together get co_recall links (Hebbian learning),
-  growing an associative network that deep recall's spreading activation can
-  traverse
+- 活性度: `B = ln(Σ w_j·(now−t_j)^(−d_i))` をシグモイドで 0..1 に正規化。アクセスログから都度計算
+- `d_i = clamp(0.5 − 0.2·(imp−5)/5, 0.3, 0.6)` — importance が高いほど忘れにくい
+- create イベント重み `1 + 2·(imp/10)` — 重大な記憶は生まれた時から強い
+- recall されただけ: weight 0.3 / 実際に役立った(reinforce): weight 1.0×strength
+- 同時に reinforce された記憶同士は co_recall リンクで結合(ヘッブ則)し、deep recall の拡散活性化で辿れる連想網が育つ
 
-### Search
+### 検索
 
-Vector neighbors (Ruri-v3 embeddings) + BM25 full-text search merged with
-RRF, then re-ranked by `0.6·relevance + 0.25·activation + 0.15·importance`.
+ベクトル近傍(Ruri-v3 埋め込み) + BM25 全文検索を RRF で統合し、
+`0.6·関連度 + 0.25·活性度 + 0.15·重要度` で再ランクします。
 
-#### Hybrid recall: exact tokens no longer sink
+#### ハイブリッド検索の改善: 完全一致トークンが埋もれなくなった
 
-Candidate relevance now blends the two search paths instead of collapsing FTS
-hits onto the vector similarity scale: vector hits keep their cosine
-similarity, and FTS hits get a lexical relevance `1 - exp(bm25)` derived
-directly from BM25 (0 for `bm25 >= 0`). When an id is hit by both, the higher
-of the two wins. Rare, decisive lexical matches — memory IDs, file paths,
-error codes, other exact tokens — now push `bm25` deep negative and surface
-`lex` near 1.0, clearing the compressed 0.8–0.87 band where Ruri-v3 cosine
-similarities tend to cluster. Previously, FTS-only hits were assigned the
-minimum vector similarity among the candidate pool, which buried exact-match
-results at the bottom of the ranking even when they were the obviously
-correct answer.
+候補の relevance は、FTS ヒットをベクトル類似度のスケールへ無理やり写像する
+のではなく、2つの検索路の結果を素直に合成するようになりました。ベクトル
+ヒットはそのままコサイン類似度を、FTS ヒットは BM25 から直接導いた字句関連度
+`1 - exp(bm25)`(`bm25 >= 0` のときは 0)を採り、両方にヒットした id は
+大きい方を採用します。記憶 ID・ファイルパス・エラーコードなどの希少で
+決定的な完全一致は bm25 が大きく負の値になり `lex` がほぼ 1.0 まで浮上する
+ため、Ruri-v3 のコサイン類似度が 0.8〜0.87 に圧縮されがちな値域を越えられます。
+旧実装では FTS のみのヒットに「候補中最小のベクトル類似度」を一律で割り当てて
+いたため、明らかに正解であっても完全一致の結果が順位表の最下位に沈んでいました。
 
-Short queries are now covered too (v0.7.1). The FTS5 trigram tokenizer cannot
-index terms shorter than 3 characters, so two-character Japanese words (like
-会議) used to be invisible to lexical search, and mixed queries containing any
-short token returned zero rows because of the implicit AND. The MATCH
-expression is now built from tokens of 3+ characters only, and when no such
-token exists the search falls back to LIKE substring matching with an
-IDF-based pseudo score (`lex = N/(N+df)`: rarer terms score higher).
+短いクエリも字句検索の対象になりました(v0.7.1)。FTS5 の trigram トークナイザは
+3文字未満の語を扱えないため、従来は「会議」のような日本語の2文字語が字句検索から
+完全に漏れ、3文字未満のトークンを含む複合クエリは AND 条件ごと0件になっていました。
+現在は3文字以上のトークンだけで MATCH 式を組み、3文字以上のトークンが1つも無い
+クエリは LIKE 部分一致にフォールバックして IDF ベースの擬似スコア
+(`lex = N/(N+df)`: 希少語ほど高い)を与えます。
 
-### Memory types
+### 記憶の種類
 
-| type | Contents |
+| type | 内容 |
 |---|---|
-| knowledge | Insights, solutions to problems, how to use tools |
-| preference | The user's preferences, style, patterns in instructions |
-| project | Goals, constraints, history, and background of the work |
-| episode | A summary of what happened in a session |
+| knowledge | 知見・問題の解法・ツールの使い方 |
+| preference | ユーザーの好み・流儀・指示の傾向 |
+| project | 仕事の目的・制約・経緯・背景 |
+| episode | セッションでやったことの要約 |
 
-### File layout
+### ファイル構成
 
 ```
 ~/.engram/
-  config.toml        Config file (generated by engram setup)
-  index.db           SQLite index (rebuildable from Markdown via reindex)
-  MEMORY_PROTOCOL.md Agent operating instructions (imported into each agent's instruction file)
-  ONBOARDING.md      Initial interview script
-  surface/           Proactive recall log and session state
-  hooks.log          Hook activity log
-  consolidation_state.json  Candidate-cluster count + last-nudge timestamp (consolidation nudge)
-  perf/perf_log.jsonl       Timing log for MCP tool calls and startup (when perf_log = true)
+  config.toml        設定ファイル(engram setup が生成)
+  index.db           SQLite インデックス(Markdown から reindex で再構築可能)
+  MEMORY_PROTOCOL.md エージェント運用指示(各エージェントの指示ファイルに組み込まれる)
+  ONBOARDING.md      初期インタビュー台本
+  surface/           自発的想起のログとセッション状態
+  hooks.log          フックの動作記録
+  consolidation_state.json  統合候補クラスタ数と最終促し時刻(統合の自動促し用)
+  perf/perf_log.jsonl       MCP ツール呼び出し・起動時間のログ(perf_log = true 時)
 
-<memories_dir>/      Source of truth: Markdown (opens and edits fine in Obsidian)
+<memories_dir>/      記憶の正本 Markdown(Obsidian でそのまま開ける・編集可)
   knowledge/
   preferences/
   projects/
@@ -331,151 +293,147 @@ IDF-based pseudo score (`lex = N/(N+df)`: rarer terms score higher).
   _trash/
 ```
 
-`memories_dir` defaults to `~/.engram/memories`, but pointing it at a Google
-Drive or OneDrive synced folder gives you backup and multi-device sharing.
-The SQLite index always stays local, so there is no sync-conflict risk.
+`memories_dir` はデフォルト `~/.engram/memories` ですが、Google Drive や OneDrive の
+同期フォルダを指定することでバックアップと複数デバイス共有が可能です。
+SQLite インデックスは常にローカルに置かれるので同期競合リスクはありません。
 
-### MCP tools
+### MCP ツール一覧
 
-| Tool | When to use |
+| ツール | いつ使う |
 |---|---|
-| `recall(query, mode, limit, type, room)` | At task start. fast = normal / deep = explores associative links, cold tier, and episodes / exhaustive = relevance-only full scan, ignoring activation, to dig up sunk memories |
-| `remember(content, type, importance, tags, related_ids, room)` | When you learn an insight, preference, context, or event. importance 1–10 scores how critical the context is |
-| `reinforce(ids, strength)` | At task end, report which memories actually helped (the nutrient for consolidation) |
-| `correct(id, corrected_content, reason)` | When a memory was wrong. Use this, not forget (engraves the mistake itself deeply) |
-| `link` / `forget` / `stats` / `reindex` | Auxiliary operations |
-| `consolidation_candidates` / `mark_consolidated` | Consolidation (below) |
+| `recall(query, mode, limit, type, room)` | タスク開始時。fast=通常 / deep=連想リンク・cold層・episodeまで探索 / exhaustive=活性度を無視し関連度のみで全件総当たり(沈んだ記憶の掘り起こし) |
+| `remember(content, type, importance, tags, related_ids, room)` | 知見・好み・文脈・出来事を得た時。importance 1-10 は文脈の重大さで採点 |
+| `reinforce(ids, strength)` | タスク完了時、実際に役立った記憶を報告(定着の栄養) |
+| `correct(id, corrected_content, reason)` | 記憶が誤っていた時。forget ではなくこれ(誤りの経験ごと深く刻む) |
+| `link` / `forget` / `stats` / `reindex` | 補助操作 |
+| `consolidation_candidates` / `mark_consolidated` | 統合(下記) |
 
-### Consolidation (the sleep of the system)
+### 統合(睡眠に相当する処理)
 
-Clusters old episode memories and distills them into knowledge. The server
-only returns candidates; the summarization is done by the LLM (your agent).
-Example nightly run:
+古い episode 記憶をクラスタ化して知識へ昇華します。サーバーは候補を返すだけで、
+要約は LLM(エージェント)が行います。夜間実行の例:
 
 ```powershell
-claude -p "Call engram's consolidation_candidates, summarize each cluster with remember (type=knowledge or project, related_ids=the source episodes), finish with mark_consolidated, then report stats."
+claude -p "engram の consolidation_candidates を呼び、各クラスタを要約して remember(type=knowledge または project, related_ids=元episode)し、mark_consolidated で完了させて。最後に stats を報告して。"
 ```
 
-#### Automatic nudge cycle
+#### 統合の自動促し(consolidation nudge)
 
-On top of the cron-style nightly run above, engram nudges the agent to
-consolidate on its own, without any scheduled job:
+上記の cron 的な夜間実行に加えて、engram はスケジュールジョブなしにエージェント
+自身へ統合を促します:
 
-1. **SessionEnd** counts how many consolidation-candidate clusters currently
-   exist (via `consolidation_candidates`) and stores the count in
-   `data_dir/consolidation_state.json`.
-2. **UserPromptSubmit** (the same lightweight hook that powers proactive
-   recall) checks that state on the next session and, if enough clusters have
-   piled up and enough time has passed since the last nudge, injects an
-   `additionalContext` message asking the agent to run
-   `consolidation_candidates` → `remember` → `mark_consolidated` at a natural
-   pause in the conversation. The nudge fires even when `surface_mode = "off"`
-   — it is independent of proactive recall.
+1. **SessionEnd** が統合候補クラスタ数(`consolidation_candidates` 相当)を
+   数え、`data_dir/consolidation_state.json` に記録します。
+2. **UserPromptSubmit**(自発的想起と同じ軽量フック)が次のセッションでこの
+   状態を確認し、クラスタが十分に溜まっていて前回の促しから十分な時間が
+   経っていれば、`additionalContext` として
+   「consolidation_candidates → remember → mark_consolidated を区切りの
+   良いところで実行してほしい」という促し文を差し込みます。この促しは
+   `surface_mode = "off"` でも発火します(自発的想起とは独立した仕組みです)。
 
-Controlled by three settings (in `config.toml` or as `ENGRAM_*` environment
-variables):
+`config.toml` (または `ENGRAM_*` 環境変数) の3つの設定で制御します:
 
-| Setting | Default | Meaning |
+| 設定 | 既定値 | 意味 |
 |---|---|---|
-| `consolidate_nudge` | `true` | Master switch for the nudge cycle |
-| `consolidate_nudge_min_clusters` | `3` | Minimum candidate clusters before nudging |
-| `consolidate_nudge_interval_days` | `7.0` | Minimum time between nudges |
+| `consolidate_nudge` | `true` | 促し機能全体のスイッチ |
+| `consolidate_nudge_min_clusters` | `3` | 促す最小クラスタ数 |
+| `consolidate_nudge_interval_days` | `7.0` | 促しの最短間隔(日) |
 
 ---
 
-## For developers
+## 開発者向け
 
-Setting up to develop in this repository (run at the repo root):
+このリポジトリで開発する場合のセットアップ(リポジトリのルートで実行):
 
 ```powershell
-# Virtual env (for development; distribution uses uv tool install)
+# 仮想環境(開発者用。配布時は uv tool install を使う)
 python -m venv "$env:USERPROFILE\.engram\venv"
 & "$env:USERPROFILE\.engram\venv\Scripts\python.exe" -m pip install -e ".[dev]"
 ```
 
-### Tests and verification
+### テストと検証
 
 ```powershell
 $py = "$env:USERPROFILE\.engram\venv\Scripts\python.exe"
 
-& $py -m pytest                          # all tests
-& $py -m pytest tests\test_setup.py -q   # setup logic only
-& $py scripts\simulate.py                # simulate access patterns (30 days)
-& $py scripts\check_mcp_e2e.py           # MCP end-to-end check
+& $py -m pytest                          # 全テスト
+& $py -m pytest tests\test_setup.py -q   # セットアップ関連のみ
+& $py scripts\simulate.py                # アクセスパターン模擬(30日)
+& $py scripts\check_mcp_e2e.py           # MCP E2E 確認
 ```
 
-### Diagnostics / CLI (for manual checks)
+### 環境診断・CLI(動作確認用)
 
 ```powershell
 $engram = "$env:USERPROFILE\.engram\venv\Scripts\engram.exe"
 
 & $engram doctor
-& $engram remember "content" --type knowledge --importance 7
-& $engram recall "query" --deep
-& $engram surface "utterance text"
+& $engram remember "本文" --type knowledge --importance 7
+& $engram recall "クエリ" --deep
+& $engram surface "発話テキスト"
 & $engram stats
 ```
 
-### Project structure
+### プロジェクト構成
 
 ```
 src/engram/
-  config.py        Settings (defaults < config.toml < env vars) + room resolution
-  engine.py        The memory engine
-  store.py         Markdown source-of-truth store
-  db.py            SQLite index (sqlite-vec + FTS5)
-  dynamics.py      ACT-R activation model
+  config.py        設定(既定値 < config.toml < 環境変数)+ 部屋の解決
+  engine.py        記憶エンジン本体
+  store.py         Markdown 正本ストア
+  db.py            SQLite インデックス(sqlite-vec + FTS5)
+  dynamics.py      ACT-R 活性化モデル
   embedder.py      RuriEmbedder / FakeEmbedder
-  server.py        MCP server (stdio)
-  cli.py           CLI entry point
-  setup.py         Setup wizard & doctor & hook registration
-  hooks.py         Hook entry points (auto-encoding / proactive recall)
-  transcript.py    Deterministic transcript summarization (auto-encoding)
-  surface.py       Lightweight search path for proactive recall (no model)
+  server.py        MCP サーバー(stdio)
+  cli.py           CLI エントリーポイント
+  setup.py         セットアップウィザード & doctor & フック登録
+  hooks.py         フック入口(自動符号化・自発的想起)
+  transcript.py    transcript の決定的要約(自動符号化)
+  surface.py       自発的想起の軽量検索路(モデル不使用)
   templates/       MEMORY_PROTOCOL.md / ONBOARDING.md
 tests/
-  test_setup.py    Setup pure-logic tests
-  test_config.py   Settings precedence tests
-  test_store.py    Markdown store tests
-  test_db.py       DB operation tests
-  test_engine.py   Engine tests
-  test_room.py     Memory room tests
-  test_surface.py  Proactive recall tests
-  test_transcript.py  Transcript summarization tests
-  test_hooks.py    Hook and hook-registration tests
-  test_integration.py  Integration tests
+  test_setup.py    セットアップ純粋ロジックのテスト
+  test_config.py   設定優先順位のテスト
+  test_store.py    Markdown ストアのテスト
+  test_db.py       DB 操作のテスト
+  test_engine.py   エンジンのテスト
+  test_room.py     記憶の部屋のテスト
+  test_surface.py  自発的想起のテスト
+  test_transcript.py  transcript 要約のテスト
+  test_hooks.py    フックとフック登録のテスト
+  test_integration.py  統合テスト
 ```
 
 ---
 
-## Troubleshooting
+## トラブルシューティング
 
-### Codex says engram is enabled but the connection times out on startup
+### Codex で engram が「有効」なのに起動時に接続タイムアウトする
 
-engram loads a ~529MB embedding model (plus checks the memories folder) on
-every startup, which can take longer than Codex's default 30-second MCP
-startup timeout — especially right after a reboot, during antivirus scans, or
-when the memories folder lives on a cloud-synced drive (Google Drive, OneDrive,
-etc.). Your memories are fine; only the initial connection is timing out.
+engram は起動のたびに約529MBの埋め込みモデルを読み込み、記憶フォルダを確認
+します。これが Codex の MCP 初期接続タイムアウト既定値(30秒)を超えることが
+あります — 特に PC 再起動直後、ウイルス対策ソフトのスキャン中、記憶フォルダ
+がクラウド同期ドライブ(Google ドライブ・OneDrive 等)上にある場合。記憶
+データは無事で、最初の接続だけが間に合っていない状態です。
 
-Newer versions of `engram setup` write a longer startup timeout automatically.
-If you registered with an older version, either re-run
-`engram setup --agents codex`, or add one line to the engram block in
-`~/.codex/config.toml` yourself:
+新しいバージョンの `engram setup` は起動待ち時間を自動で書き込みます。古い
+バージョンで登録した場合は、`engram setup --agents codex` を再実行するか、
+`~/.codex/config.toml` の engram ブロックに次の1行を追記してください:
 
 ```toml
 [mcp_servers.engram]
-command = "..."                # leave as is
-startup_timeout_sec = 120.0    # add this line
+command = "..."                # そのまま
+startup_timeout_sec = 120.0    # この行を追記
 ```
 
-Then fully restart Codex (quit and relaunch, not just close the window).
+その後、Codex を完全に再起動してください(ウィンドウを閉じるだけでなく
+終了→起動)。
 
 ---
 
-## Update
+## アップデート
 
-Re-run the same one-line installer to overwrite with the latest version:
+インストールと同じ1行コマンドをもう一度実行するだけで、最新版に上書き更新されます:
 
 ```powershell
 irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
@@ -487,34 +445,51 @@ macOS / Linux:
 curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
 ```
 
-`uv tool upgrade engram` does the same.
+`uv tool upgrade engram` でも同じです。
 
-- Your memories and config (`~/.engram` and the memories folder) are kept — nothing is deleted
-- After updating, restart each agent that uses engram (Claude Code, etc.) so the MCP server reconnects
+- 記憶・設定(`~/.engram` と記憶フォルダ)はそのまま残ります。消えません
+- 更新後は、engram を使う各エージェント(Claude Code 等)を再起動してください(MCP サーバーの再接続に必要)
 
 ---
 
-## Uninstall
+## アンインストール
 
 ```powershell
-# 1. Remove the registration from each agent
+# 1. 各エージェントから登録を削除
 claude mcp remove engram
 
-# 1b. Manually remove the engram entries from hooks in ~/.claude/settings.json
-#     (the "engram hook ..." commands under SessionEnd / UserPromptSubmit)
-# 2. Manually remove the engram block from ~/.claude/CLAUDE.md
-# 3. Manually remove the [mcp_servers.engram] block from ~/.codex/config.toml
-# 4. Manually remove the engram entry from ~/.gemini/config/mcp_config.json
+# 1b. ~/.claude/settings.json の hooks から engram の項目
+#     (SessionEnd / UserPromptSubmit の "engram hook ...")を手動削除
+# 2. ~/.claude/CLAUDE.md から engram のブロックを手動削除
+# 3. ~/.codex/config.toml から [mcp_servers.engram] ブロックを手動削除
+# 4. ~/.gemini/config/mcp_config.json から engram エントリを手動削除
 
-# 5. Uninstall engram itself
+# 5. engram 本体をアンインストール
 uv tool uninstall engram
 
-# 6. To delete the data as well (memories, config, model cache)
+# 6. データを削除する場合(記憶・設定・モデルキャッシュ)
 Remove-Item -Recurse -Force "$env:USERPROFILE\.engram"
 Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--cl-nagoya--ruri*"
 ```
 
-On macOS / Linux, steps 5–6 are:
+macOS / Linux の手順5-6:
+
+```bash
+uv tool uninstall engram
+rm -rf ~/.engram
+rm -rf ~/.cache/huggingface/hub/models--cl-nagoya--ruri*
+```
+p_config.json から engram エントリを手動削除
+
+# 5. engram 本体をアンインストール
+uv tool uninstall engram
+
+# 6. データを削除する場合(記憶・設定・モデルキャッシュ)
+Remove-Item -Recurse -Force "$env:USERPROFILE\.engram"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--cl-nagoya--ruri*"
+```
+
+macOS / Linux の手順5-6:
 
 ```bash
 uv tool uninstall engram
