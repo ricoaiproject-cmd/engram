@@ -132,6 +132,9 @@ def test_session_end_never_raises_on_garbage(engram_home):
 # ---------------------------------------------------------------------------
 
 def test_user_prompt_shadow_logs(engram_home, monkeypatch):
+    (engram_home / "config.toml").write_text(
+        "surface_mode = 'shadow'\n", encoding="utf-8",
+    )
     # 記憶を1件用意
     engine = _fake_build_engine()
     engine.remember("予算要求の書式は財務課の様式7を使うこと", "knowledge", 7)

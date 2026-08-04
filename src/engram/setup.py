@@ -604,10 +604,10 @@ def setup_main(
         print(f"  memories_dir: {chosen_dir}")
         results.append(("設定ファイル作成", True, str(cfg_path)))
 
-    # 自発的想起のモードを明示しておく(既定: shadow=ログのみで様子見)
+    # 自発的想起のモードを明示しておく(既定: active=関連記憶を文脈に差し込む)
     if "surface_mode" not in read_config_toml(cfg_path):
-        merge_config_toml(cfg_path, {"surface_mode": "shadow"})
-        print("  surface_mode: shadow(自発的想起はまずログのみで観察)")
+        merge_config_toml(cfg_path, {"surface_mode": "active"})
+        print("  surface_mode: active(関連記憶を自動で文脈に差し込む。ログのみの shadow へ変更可)")
 
     chosen_dir = Path(existing_cfg.get("memories_dir", chosen_dir)).expanduser().resolve() \
         if "memories_dir" in existing_cfg and memories_dir is None else chosen_dir.expanduser().resolve()

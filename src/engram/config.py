@@ -130,7 +130,7 @@ class Settings:
     auto_encode_min_chars: int = 16      # ユーザー発言の合計がこれ未満のセッションは記録しない
 
     # --- 自発的想起(surface)---
-    surface_mode: str = "shadow"         # off | shadow(ログのみ) | active(文脈に差し込む)
+    surface_mode: str = "active"         # off | shadow(ログのみ) | active(文脈に差し込む)
     surface_threshold: float = 0.45      # このスコア以上の記憶だけ浮上する
     # 関連度の最低ライン(ゲート)。活性度・重要度がいくら高くても、発話との
     # 字句関連がこれ未満なら浮上しない。よく使う重要な記憶が無関係な文脈に
