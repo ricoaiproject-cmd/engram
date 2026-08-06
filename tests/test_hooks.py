@@ -320,9 +320,10 @@ class TestConsolidationNudgeViaUserPrompt:
 
     def test_user_prompt_no_nudge_below_threshold(self, engram_home, capsys):
         """閾値未満のクラスタ数では additionalContext が出ないこと
-        (surface も無関係のため何も出力されない)。"""
+        (surface も無関係のため何も出力されない。recall nudge も切って
+        「完全に無出力」の経路を検証する)。"""
         (engram_home / "config.toml").write_text(
-            "surface_mode = 'off'\n", encoding="utf-8",
+            "surface_mode = 'off'\nrecall_nudge = false\n", encoding="utf-8",
         )
         settings = get_settings()
         _write_consolidation_state(settings, {
@@ -632,3 +633,73 @@ class TestMarkConsolidatedRefreshesState:
         state = _read_consolidation_state(settings)
         assert state["clusters"] == 1  # 5 のまま放置されない
         assert state["skill_clusters"] == 1  # 9 のまま放置されない(スキル化候補側も更新)
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 着手前 recall の促し(recall nudge)
+# ---------------------------------------------------------------------------
+
+class TestRecallNudge:
+    """_recall_nudge と run_user_prompt 結線のテスト。"""
+
+    def _stdin(self, session_id, prompt="予算要求の計画書を作りたい"):
+        return json.dumps({
+            "session_id": session_id, "prompt": prompt, "cwd": "C:/anywhere",
+        })
+
+    def test_fires_once_per_session(self, engram_home, capsys):
+        """同一セッションでは最初の実質発話で一度だけ促すこと。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        assert run_user_prompt(self._stdin("sess-rn-1")) == 0
+        first = capsys.readouterr().out
+        payload = json.loads(first)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert "想起の促し" in ctx
+        assert "recall" in ctx
+
+        # 2発話目では促さない(surface=off なので完全に無出力)
+        assert run_user_prompt(self._stdin("sess-rn-1")) == 0
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_fires_again_for_new_session(self, engram_home, capsys):
+        """別セッションでは改めて促すこと。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        assert run_user_prompt(self._stdin("sess-rn-2")) == 0
+        assert "想起の促し" in capsys.readouterr().out
+        assert run_user_prompt(self._stdin("sess-rn-3")) == 0
+        assert "想起の促し" in capsys.readouterr().out
+
+    def test_disabled_by_setting(self, engram_home, capsys):
+        """recall_nudge=false なら促さないこと。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\nrecall_nudge = false\n", encoding="utf-8",
+        )
+        assert run_user_prompt(self._stdin("sess-rn-4")) == 0
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_not_fired_on_short_or_system_prompt(self, engram_home, capsys):
+        """短文・システムテキストでは促しを消費しない(実質発話まで温存)こと。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        # 短文とスラッシュコマンドではガードが先に効き、マーカーも作られない
+        assert run_user_prompt(self._stdin("sess-rn-5", "短い")) == 0
+        assert run_user_prompt(self._stdin("sess-rn-5", "/model 切替")) == 0
+        assert capsys.readouterr().out.strip() == ""
+        # その後の実質発話で初めて促される
+        assert run_user_prompt(self._stdin("sess-rn-5")) == 0
+        assert "想起の促し" in capsys.readouterr().out
+
+    def test_marker_rides_on_surface_state_cleanup(self, engram_home):
+        """マーカーが surface の掃除対象(session-*.json)の命名に乗っていること。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8",
+        )
+        assert run_user_prompt(self._stdin("sess-rn-6")) == 0
+        marker = engram_home / "surface" / "session-sess-rn-6-nudged.json"
+        assert marker.is_file()
+        assert marker.match("session-*.json")

@@ -202,6 +202,42 @@ def _skill_nudge(settings: Settings, now: float | None = None) -> str | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 着手前 recall の促し(recall nudge)
+#
+# consolidation / skill nudge と同型の第3のナッジ。セッション最初の実質的な
+# 人間発話で一度だけ「recall してから着手」を促す。マーカーは surface の
+# セッション状態と同じ命名規則(session-*.json)に乗せ、_save_surfaced_ids の
+# age ベース掃除に相乗りする。
+# ---------------------------------------------------------------------------
+
+def _recall_nudge(settings: Settings, session_id: str) -> str | None:
+    """セッション最初の実質発話で一度だけ、着手前 recall の促し文を返す。
+
+    マーカーファイルへの記録に失敗したときは促さない(毎プロンプト促す
+    事故防止。consolidation nudge と同じ原則)。
+    """
+    if not settings.recall_nudge:
+        return None
+    from .surface import _SESSION_ID_SAFE, _surface_dir
+
+    safe = _SESSION_ID_SAFE.sub("_", session_id) or "unknown"
+    marker = _surface_dir(settings) / f"session-{safe}-nudged.json"
+    if marker.is_file():
+        return None
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}", encoding="utf-8")
+    except OSError:
+        return None
+    return (
+        "(engram 想起の促し) このセッションではまだ記憶を検索していません。"
+        "作業に着手する前に、タスクの主題で recall を呼び、関連する過去の"
+        "知見・流儀・文脈を確認してください。recall ツールが見当たらない"
+        "場合は、ツール検索(ToolSearch 等)で読み込んでから呼ぶこと。"
+    )
+
+
 def run_session_end(stdin_text: str | None = None) -> int:
     """SessionEnd フック本体。常に 0 を返す(セッション終了を妨げない)。"""
     try:
@@ -320,6 +356,11 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
             return 0
 
         context_parts: list[str] = []
+
+        # 着手前 recall の促し(セッション初回のみ。surface とは独立)
+        recall_nudge = _recall_nudge(settings, session_id)
+        if recall_nudge:
+            context_parts.append(recall_nudge)
 
         if settings.surface_mode != "off":
             room = resolve_room(cwd, settings.room_paths)

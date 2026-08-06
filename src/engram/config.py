@@ -139,6 +139,13 @@ class Settings:
     surface_max_items: int = 2           # 1プロンプトで差し込む最大件数
     surface_min_prompt_chars: int = 8    # これより短い発言では想起しない
 
+    # --- 着手前 recall の促し(recall nudge)---
+    # 「タスク開始時に recall する」という記憶プロトコルの責務は、モデルの
+    # 自発性に任せると世代交代で静かに守られなくなる(2026-08 実測: モデルに
+    # よってセッション実施率に 74% / 48% の開きが出た)。セッション最初の
+    # 実質的な発話で一度だけ促しを差し込み、想起の起点をモデル非依存にする。
+    recall_nudge: bool = True
+
     # --- 記憶の部屋(仕事/個人の文脈分離)---
     # {ディレクトリのプレフィックス: 部屋名}。最長一致で判定、該当なしは "common"
     room_paths: dict = field(default_factory=dict)
