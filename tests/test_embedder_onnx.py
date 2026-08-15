@@ -123,7 +123,7 @@ class TestMakeEmbedder:
         _fabricate_onnx_dir(s)
         emb = make_embedder(s)
         assert emb.dim == 512
-        assert emb._session is None  # セッション未ロードのまま
+        assert not emb.loaded  # セッション未ロードのまま
 
     def test_backend_onnx_forced_missing_dir_raises(self, tmp_path):
         s = _make_settings(tmp_path, "onnx")
@@ -152,6 +152,75 @@ class TestMakeEmbedder:
         # meta.json なし
         emb = make_embedder(s)
         assert isinstance(emb, RuriEmbedder)
+
+
+# ---------------------------------------------------------------------------
+# アイドル解放(unload)— Codex 多重プロセスのメモリ積み上がり対策(v0.12.0)
+# ---------------------------------------------------------------------------
+
+class TestOnnxUnload:
+    def _loaded_embedder(self, tmp_path) -> OnnxRuriEmbedder:
+        """ロード済みに見せかけた embedder(実モデル不使用)。"""
+        s = _make_settings(tmp_path, "auto")
+        _fabricate_onnx_dir(s)
+        emb = make_embedder(s)
+        emb._parts = (object(), object(), ["input_ids"])  # 擬似ロード状態
+        return emb
+
+    def test_unload_releases_and_reports(self, tmp_path):
+        emb = self._loaded_embedder(tmp_path)
+        assert emb.loaded
+        assert emb.unload() is True  # 解放を実行した
+        assert not emb.loaded
+
+    def test_unload_when_not_loaded_is_noop(self, tmp_path):
+        s = _make_settings(tmp_path, "auto")
+        _fabricate_onnx_dir(s)
+        emb = make_embedder(s)
+        assert not emb.loaded
+        assert emb.unload() is False  # 何も解放していない
+
+    def test_unload_then_reload_on_next_use(self, tmp_path):
+        """解放後の次回利用で _load が再ロードを試みること(モデルは空ファイル
+        なのでロード失敗=例外。「ロードが走った」ことの証明として十分)。"""
+        import pytest
+
+        emb = self._loaded_embedder(tmp_path)
+        emb.unload()
+        with pytest.raises(Exception):
+            emb.embed_query("再ロードを誘発")
+
+    def test_encode_holds_local_refs_against_unload(self, tmp_path):
+        """_encode がロード結果をローカル変数に受けているため、実行中に
+        unload されても手元の参照で完走できる(競合安全性)。"""
+
+        class FakeTokenizer:
+            def encode_batch(self, texts):
+                class E:
+                    ids = [1, 2]
+                    attention_mask = [1, 1]
+
+                return [E() for _ in texts]
+
+        class FakeSession:
+            def run(self, _out, feeds):
+                batch = len(feeds["input_ids"])
+                return [np.ones((batch, 2, 4), dtype=np.float32)]
+
+        emb = self._loaded_embedder(tmp_path)
+        emb._parts = (FakeSession(), FakeTokenizer(), ["input_ids", "attention_mask"])
+
+        original_load = emb._load
+
+        def load_then_unload():
+            parts = original_load()
+            emb.unload()  # ロード直後に横から解放されたことを再現
+            return parts
+
+        emb._load = load_then_unload
+        vecs = emb.embed_docs(["a", "b"])  # 例外なく完走すること
+        assert vecs.shape == (2, 4)
+        assert not emb.loaded
 
 
 # ---------------------------------------------------------------------------

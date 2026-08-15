@@ -295,6 +295,14 @@ def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, s
 # (実機で接続失敗が発生)。登録時に起動待ち時間を明示して回避する
 _CODEX_STARTUP_TIMEOUT_SEC = "120.0"
 
+# Codex は実行ホスト(会話・code mode 実行)ごとに stdio MCP プロセスを起動し、
+# 使い終わっても残留することがある(実機: Codex Desktop 26.810 で4プロセス
+# 同時)。ONNX 生成済み環境の既定(ENGRAM_PRELOAD=auto→background)のままだと
+# 全プロセスが約1.1GBのモデルを個別に先読みし、16GB 級 PC のメモリを使い
+# 果たす。Codex にだけは「使うまでロードしない」を登録時に明示する
+# (実際にツールを呼んだプロセスだけ遅延ロードする。記憶機能は維持される)
+_CODEX_PRELOAD_LINE = 'ENGRAM_PRELOAD = "off"'
+
 
 def register_codex(
     codex_config_path: Path,
@@ -302,8 +310,9 @@ def register_codex(
 ) -> tuple[bool, str]:
     """~/.codex/config.toml に engram MCP ブロックを追記する。冪等。
 
-    登録済みブロックに startup_timeout_sec が無ければ追記する
-    (旧バージョンで登録したユーザーも setup 再実行だけで直る)。
+    登録済みブロックに startup_timeout_sec / env の ENGRAM_PRELOAD が
+    無ければ追記する(旧バージョンで登録したユーザーも setup 再実行だけで直る)。
+    ユーザーが ENGRAM_PRELOAD を手動設定済みなら、その値には触れない。
     """
     try:
         import re
@@ -348,6 +357,26 @@ def register_codex(
                     updated,
                 )
                 actions.append("起動待ち時間を追加")
+            # env サブテーブルの ENGRAM_PRELOAD(メモリ多重ロード対策)。
+            # ユーザーが値を手動設定済みなら尊重して触れない
+            env_block = re.search(
+                r"\[mcp_servers\.engram\.env\]\r?\n(?:(?!\[).*\r?\n?)*", updated
+            )
+            if env_block is None:
+                # env テーブルごと末尾に追記(TOML はテーブルの出現順を問わない)
+                if not updated.endswith("\n"):
+                    updated += "\n"
+                updated += (
+                    f"\n[mcp_servers.engram.env]\n{_CODEX_PRELOAD_LINE}\n"
+                )
+                actions.append("プリロード抑止を追加")
+            elif "ENGRAM_PRELOAD" not in env_block.group(0):
+                updated = re.sub(
+                    r"(\[mcp_servers\.engram\.env\]\r?\n)",
+                    lambda mm: f"{mm.group(1)}{_CODEX_PRELOAD_LINE}\n",
+                    updated,
+                )
+                actions.append("プリロード抑止を追加")
             if not actions:
                 return True, "既追記済み(スキップ)"
             codex_config_path.write_text(updated, encoding="utf-8")
@@ -356,6 +385,8 @@ def register_codex(
             f"\n[mcp_servers.engram]\n"
             f"command = '{mcp_path_str}'\n"
             f"startup_timeout_sec = {_CODEX_STARTUP_TIMEOUT_SEC}\n"
+            f"\n[mcp_servers.engram.env]\n"
+            f"{_CODEX_PRELOAD_LINE}\n"
         )
         with codex_config_path.open("a", encoding="utf-8") as f:
             f.write(addition)

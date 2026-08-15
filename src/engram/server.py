@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -37,6 +38,16 @@ _engine_lock = threading.Lock()
 # サーバーの既定の部屋。プロセス起動時の作業ディレクトリ(=エージェントを
 # 起動したプロジェクト)から config の room_paths で決まる
 _room: str | None = None
+
+# 最後にツールが呼ばれた(またはモデルが先読みされた)時刻。アイドル解放の
+# 判定に使う。CPython では float 代入はアトミックなのでロック不要
+_last_activity: float = time.monotonic()
+
+
+def _touch() -> None:
+    """アイドル解放タイマーをリセットする(ツール呼び出し・先読み完了時)。"""
+    global _last_activity
+    _last_activity = time.monotonic()
 
 
 def _get_engine() -> MemoryEngine:
@@ -57,7 +68,9 @@ def _timed(name: str):
     FastMCP はツール関数のシグネチャを検査してスキーマを作るため、ツール関数
     自体をデコレータで包むのではなく、各ツールの本体内で `with _timed(...):`
     のように使う(関数のシグネチャ・docstring には一切触れない)。
+    全ツールがここを通るので、アイドル解放タイマーのリセットも兼ねる。
     """
+    _touch()
     return perf.timed(_get_engine().settings, "tool", name)
 
 
@@ -338,6 +351,9 @@ def _preload() -> None:
     try:
         engine = _get_engine()
         engine.embedder.embed_query("ウォームアップ")
+        # 先読み完了からアイドル計測を始める(ツールが一度も呼ばれない
+        # プロセスは idle_sec 後にモデルが解放される — それが狙い)
+        _touch()
         print("engram: engine preloaded", file=sys.stderr)
     except Exception as e:  # 失敗しても起動は続け、初回ツール呼び出しで再試行
         ok = False
@@ -349,6 +365,88 @@ def _preload() -> None:
                 settings,
                 {"ts": time.time(), "kind": "preload", "name": "preload", "ms": ms, "ok": ok},
             )
+
+
+def _resolve_idle_unload_sec(raw: str | None) -> float:
+    """ENGRAM_IDLE_UNLOAD_SEC の値を解決する(純粋関数・テスト対象)。
+
+    既定 600 秒(10分)。0 以下で無効。数値でない値は既定に落とす。
+    """
+    default = 600.0
+    if raw is None or not raw.strip():
+        return default
+    try:
+        sec = float(raw.strip())
+    except ValueError:
+        return default
+    return max(0.0, sec)
+
+
+def _maybe_idle_unload(idle_sec: float) -> bool:
+    """アイドル判定1回分。解放を実行したら True(テスト対象)。
+
+    解放するのは unload() を持つ embedder(=ONNX 経路)だけ。torch 経路は
+    再ロードが Windows で3分級になる病理(main() のコメント参照)があるため
+    対象外。エンジン未構築(モデル未ロード)なら何もしない — 解放のために
+    エンジンを構築しては本末転倒。
+    """
+    import gc
+    import sys
+
+    engine = _engine  # _get_engine() は使わない(構築を誘発するため)
+    if engine is None:
+        return False
+    embedder = engine.embedder
+    unload = getattr(embedder, "unload", None)
+    if unload is None or not getattr(embedder, "loaded", False):
+        return False
+    idle = time.monotonic() - _last_activity
+    if idle < idle_sec:
+        return False
+    if not unload():
+        return False
+    gc.collect()  # ORT セッションのアリーナを即時返却させる
+    print(
+        f"engram: idle {int(idle)}s >= {int(idle_sec)}s, "
+        "embedding model unloaded (reloads on next tool call)",
+        file=sys.stderr,
+    )
+    try:
+        if engine.settings.perf_log:
+            perf.append_perf(
+                engine.settings,
+                {
+                    "ts": time.time(),
+                    "kind": "unload",
+                    "name": "idle_unload",
+                    "ms": idle * 1000.0,
+                    "ok": True,
+                },
+            )
+    except Exception:
+        pass  # 記録は最善努力
+    return True
+
+
+def _idle_unload_loop(idle_sec: float) -> None:
+    """アイドル時に埋め込みモデルをメモリから解放するデーモンループ。
+
+    背景: stdio MCP は常駐プロセスであり、Codex のように1クライアントが
+    実行ホストごとに MCP プロセスを起動・残留させる環境では、約1.1GBの
+    ONNX モデルがプロセス数ぶん積み上がる(実機: 26.810 で4プロセス同時、
+    16GB PC の空きが約1GBまで低下)。ENGRAM_PRELOAD=off は「使うまで
+    ロードしない」だが、実際にツールを使ったプロセスのロード分は残る。
+    このループが「使い終わったら返す」の側を受け持つ。
+    """
+    # 起床間隔は idle_sec より細かく(最大60秒)。解放は最悪 idle_sec+間隔 後
+    interval = min(60.0, max(1.0, idle_sec / 4))
+    while True:
+        time.sleep(interval)
+        try:
+            _maybe_idle_unload(idle_sec)
+        except Exception:
+            # 解放は最善努力。失敗してもサーバー本体は止めない
+            continue
 
 
 def _resolve_preload_mode(raw: str | None, onnx_ready: bool) -> str:
@@ -421,6 +519,17 @@ def main() -> None:
     elif mode == "background":
         threading.Thread(
             target=_preload, name="engram-preload", daemon=True
+        ).start()
+
+    # ENGRAM_IDLE_UNLOAD_SEC 秒(既定600)ツールが呼ばれなければ埋め込み
+    # モデルを解放する(0以下で無効)。詳細は _idle_unload_loop の docstring
+    idle_sec = _resolve_idle_unload_sec(os.environ.get("ENGRAM_IDLE_UNLOAD_SEC"))
+    if idle_sec > 0:
+        threading.Thread(
+            target=_idle_unload_loop,
+            args=(idle_sec,),
+            name="engram-idle-unload",
+            daemon=True,
         ).start()
 
     mcp.run()

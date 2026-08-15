@@ -133,9 +133,10 @@ class OnnxRuriEmbedder:
         self._dir = Path(model_dir)
         self._query_prefix = query_prefix
         self._doc_prefix = doc_prefix
-        self._session = None
-        self._tokenizer = None
-        self._input_names: list[str] = []
+        # (session, tokenizer, input_names) を1つのタプルで持つ。unload と
+        # 実行中の _encode が競合しても、_encode はロード結果をローカル変数に
+        # 受けてから使うため、参照が生きている限り安全に完走できる
+        self._parts: tuple | None = None
         self._meta: dict | None = None
         self._lock = threading.Lock()
 
@@ -156,11 +157,17 @@ class OnnxRuriEmbedder:
     def dim(self) -> int:
         return int(self._load_meta()["dim"])
 
-    def _load(self):
-        if self._session is not None:
-            return self._session
+    def _load(self) -> tuple:
+        """(session, tokenizer, input_names) を返す。
+
+        呼び出し側は戻り値をローカル変数に受けてから使うこと。self の属性を
+        直接参照すると、実行中に unload() された瞬間に None を踏む。
+        """
+        parts = self._parts
+        if parts is not None:
+            return parts
         with self._lock:
-            if self._session is None:
+            if self._parts is None:
                 import onnxruntime as ort
                 from tokenizers import Tokenizer
 
@@ -176,25 +183,42 @@ class OnnxRuriEmbedder:
                 # stdio MCP では stdout が JSON-RPC 専用のため、ORT の警告類も
                 # 出力に混ぜない(3 = ERROR 以上のみ)
                 opts.log_severity_level = 3
-                self._session = ort.InferenceSession(
+                session = ort.InferenceSession(
                     str(self._dir / "model.onnx"),
                     sess_options=opts,
                     providers=["CPUExecutionProvider"],
                 )
-                self._input_names = [
-                    i.name for i in self._session.get_inputs()
-                ]
-                self._tokenizer = tok
-        return self._session
+                input_names = [i.name for i in session.get_inputs()]
+                self._parts = (session, tok, input_names)
+            return self._parts
+
+    @property
+    def loaded(self) -> bool:
+        """モデルがメモリ上にあるか(アイドル解放の判定に使う)。"""
+        return self._parts is not None
+
+    def unload(self) -> bool:
+        """モデルをメモリから解放する。解放したら True。
+
+        stdio MCP は常駐プロセスのため、Codex のように1クライアントが複数
+        プロセスを起動・残留させる環境では、使われていないモデル(約1.1GB)が
+        積み上がる(実機: 26.810 で4プロセス同時)。アイドル時に解放すれば
+        次回利用時の再ロード(ONNX は数秒)だけで済み、記憶機能は失われない。
+        実行中の _encode とは競合しない(_load の docstring 参照)。
+        """
+        with self._lock:
+            was_loaded = self._parts is not None
+            self._parts = None
+        return was_loaded
 
     def _encode(self, texts: list[str]) -> np.ndarray:
-        session = self._load()
-        encodings = self._tokenizer.encode_batch(texts)
+        session, tokenizer, input_names = self._load()
+        encodings = tokenizer.encode_batch(texts)
         ids = np.asarray([e.ids for e in encodings], dtype=np.int64)
         mask = np.asarray([e.attention_mask for e in encodings], dtype=np.int64)
 
         feeds: dict[str, np.ndarray] = {}
-        for name in self._input_names:
+        for name in input_names:
             if name == "input_ids":
                 feeds[name] = ids
             elif name == "attention_mask":

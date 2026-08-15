@@ -323,9 +323,18 @@ class TestCodexConfig:
         assert "[mcp_servers.engram]" in content
         # 既定30秒では起動が間に合わないことがあるため必ず明示する
         assert "startup_timeout_sec = 120.0" in content
+        # Codex は実行ホストごとに MCP プロセスを起動・残留させるため、
+        # 全プロセスがモデルを先読みしないよう必ず抑止する
+        assert "[mcp_servers.engram.env]" in content
+        assert 'ENGRAM_PRELOAD = "off"' in content
+        # 書いた TOML が構文的に正しいこと
+        import tomllib
+
+        parsed = tomllib.loads(content)
+        assert parsed["mcp_servers"]["engram"]["env"]["ENGRAM_PRELOAD"] == "off"
 
     def test_idempotent_if_already_registered(self, tmp_path):
-        """同じパスで登録済み(起動待ち時間も設定済み)ならスキップ。"""
+        """同じパスで登録済み(起動待ち時間・プリロード抑止も設定済み)ならスキップ。"""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
         same_path = str(fake_mcp).replace("\\", "/")
@@ -333,7 +342,8 @@ class TestCodexConfig:
         codex_cfg.parent.mkdir(parents=True, exist_ok=True)
         codex_cfg.write_text(
             f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
-            f"startup_timeout_sec = 120.0\n",
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.env]\nENGRAM_PRELOAD = \"off\"\n",
             encoding="utf-8",
         )
 
@@ -344,6 +354,20 @@ class TestCodexConfig:
         # 重複追加されていないこと
         assert content.count("[mcp_servers.engram]") == 1
         assert content.count("startup_timeout_sec") == 1
+        assert content.count("ENGRAM_PRELOAD") == 1
+
+    def test_register_twice_converges(self, tmp_path):
+        """新規登録→再実行で2回目はスキップになり、内容が変わらない(収束性)。"""
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+
+        ok1, _ = register_codex(codex_cfg, fake_mcp)
+        first = codex_cfg.read_text(encoding="utf-8")
+        ok2, msg2 = register_codex(codex_cfg, fake_mcp)
+        assert ok1 and ok2
+        assert "スキップ" in msg2
+        assert codex_cfg.read_text(encoding="utf-8") == first
 
     def test_timeout_added_to_legacy_entry(self, tmp_path):
         """旧バージョンで登録された(起動待ち時間なし)ブロックには追記する。
@@ -427,6 +451,87 @@ class TestCodexConfig:
         content = codex_cfg.read_text(encoding="utf-8")
         assert "[some_other_setting]" in content
         assert "[mcp_servers.engram]" in content
+
+    def test_preload_added_to_legacy_entry(self, tmp_path):
+        """旧バージョンで登録された(env なし)ブロックには追記する。
+        実機で発生: Codex Desktop 26.810 が実行ホストごとに MCP を起動・
+        残留させ、各プロセスが約1.1GBのモデルを先読みして16GB PCの空きが
+        約1GBまで低下した。"""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.tools.recall]\napproval_mode = 'auto'\n",
+            encoding="utf-8",
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "プリロード抑止" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        import tomllib
+
+        parsed = tomllib.loads(content)
+        assert parsed["mcp_servers"]["engram"]["env"]["ENGRAM_PRELOAD"] == "off"
+        # tools サブセクション等の他の設定は無傷
+        assert parsed["mcp_servers"]["engram"]["tools"]["recall"][
+            "approval_mode"
+        ] == "auto"
+
+    def test_preload_line_added_into_existing_env_block(self, tmp_path):
+        """env テーブルが既にある(他の変数入り)場合は、その中に行を足す。
+        テーブルを二重に作らないこと。"""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.env]\nSOME_VAR = \"x\"\n",
+            encoding="utf-8",
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "プリロード抑止" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        assert content.count("[mcp_servers.engram.env]") == 1
+        import tomllib
+
+        parsed = tomllib.loads(content)
+        env = parsed["mcp_servers"]["engram"]["env"]
+        assert env["ENGRAM_PRELOAD"] == "off"
+        assert env["SOME_VAR"] == "x"  # 既存の変数は無傷
+
+    def test_manual_preload_value_is_respected(self, tmp_path):
+        """ユーザーが ENGRAM_PRELOAD を手動設定済み(値が off 以外でも)なら
+        触れない。設定の所有権はユーザーにある。"""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.env]\n"
+            f"# 手動チューニング済み\n"
+            f"ENGRAM_PRELOAD = \"background\"\n",
+            encoding="utf-8",
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "スキップ" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        assert 'ENGRAM_PRELOAD = "background"' in content  # 値はそのまま
+        assert content.count("ENGRAM_PRELOAD") == 1
 
     def test_creates_file_if_not_exists(self, tmp_path):
         codex_cfg = tmp_path / ".codex" / "config.toml"
