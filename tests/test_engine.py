@@ -7,6 +7,7 @@ db / store は NotImplementedError スタブのため、unittest.mock で差し�
 
 from __future__ import annotations
 
+import json
 import time
 import math
 from pathlib import Path
@@ -1024,6 +1025,77 @@ class TestIndexFreshness:
         assert res["action"] == "in_sync"
         assert res["valid"] == 5
         engine.reindex.assert_not_called()
+
+    @staticmethod
+    def _state_path(engine):
+        return Path(engine.settings.data_dir) / "startup_index_state.json"
+
+    def test_phantom_scan_records_benign_offset(self, tmp_path):
+        """全件走査で無害と確認したズレ幅を状態ファイルへ記録する。"""
+        engine, db, store = _build_engine(tmp_path)
+        store.count_memory_files.return_value = 7      # phantom 2件込み
+        db.all_memories.return_value = self._active(5)
+        store.scan_all.return_value = [object()] * 5
+
+        engine.check_index_freshness(mode="auto")
+
+        state = json.loads(self._state_path(engine).read_text(encoding="utf-8"))
+        assert state == {"benign_offset": 2}
+
+    def test_known_benign_offset_skips_scan(self, tmp_path):
+        """ズレ幅が前回の無害なズレ幅と一致 → 全件走査せず in_sync。"""
+        engine, db, store = _build_engine(tmp_path)
+        path = self._state_path(engine)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"benign_offset": 2}), encoding="utf-8")
+        store.count_memory_files.return_value = 12     # ローカル remember で増えた
+        db.all_memories.return_value = self._active(10)
+        engine.reindex = MagicMock()
+
+        res = engine.check_index_freshness(mode="auto")
+
+        assert res["action"] == "in_sync"
+        store.scan_all.assert_not_called()
+        engine.reindex.assert_not_called()
+
+    def test_changed_offset_falls_back_to_scan(self, tmp_path):
+        """ズレ幅が変わった(他マシンが記憶を書いた)→ 従来どおり走査して reindex。"""
+        engine, db, store = _build_engine(tmp_path)
+        path = self._state_path(engine)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"benign_offset": 2}), encoding="utf-8")
+        store.count_memory_files.return_value = 15
+        db.all_memories.return_value = self._active(10)
+        store.scan_all.return_value = [object()] * 13
+        engine.reindex = MagicMock(return_value={
+            "added": 3, "updated": 0, "removed": 0, "unchanged": 10})
+
+        res = engine.check_index_freshness(mode="auto")
+
+        assert res["action"] == "reindexed"
+        store.scan_all.assert_called_once()
+        engine.reindex.assert_called_once()
+
+    def test_corrupt_state_file_falls_back_to_scan(self, tmp_path):
+        """状態ファイルが壊れていても例外にせず、従来どおり全件走査する。"""
+        engine, db, store = _build_engine(tmp_path)
+        path = self._state_path(engine)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        store.count_memory_files.return_value = 7
+        db.all_memories.return_value = self._active(5)
+        store.scan_all.return_value = [object()] * 5
+        engine.reindex = MagicMock()
+
+        res = engine.check_index_freshness(mode="auto")
+
+        assert res["action"] == "in_sync"
+        assert res["valid"] == 5
+        store.scan_all.assert_called_once()
+        engine.reindex.assert_not_called()
+        # 走査結果で状態ファイルが正しい内容に書き直される
+        state = json.loads(path.read_text(encoding="utf-8"))
+        assert state == {"benign_offset": 2}
 
     def test_auto_reindexes_on_real_drift(self, tmp_path):
         """有効な記憶が index より多い(他マシンの未取り込み)→ auto は reindex。"""

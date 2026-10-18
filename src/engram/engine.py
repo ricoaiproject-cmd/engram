@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from dataclasses import asdict
@@ -1098,11 +1099,42 @@ class MemoryEngine:
             # 速い経路: raw .md 件数が一致すれば同期済みとみなし、走査しない
             return {"action": "in_sync", "markdown": md_count, "index": idx_count}
 
+        # 2つ目の速い経路: 非記憶 .md(例 _hypotheses/run_log.md)や壊れた .md が
+        # あると raw 件数は恒常的にズレ、毎起動で下の全件走査に入る。記憶フォルダが
+        # Google Drive だと 4500 件の open に約118秒かかり、ENGRAM_PRELOAD=blocking
+        # の MCP ハンドシェイクが 120 秒で時間切れになった。
+        # 前回の全件走査で「無害」と確かめたズレ幅(md - valid)と今回のズレ幅
+        # (md - index)が同じなら、ローカルの remember は md と index を同数増やす
+        # だけなので同期済みとみなす。他マシンが記憶を書けばズレ幅が変わり、
+        # 従来どおり全件走査に入る。状態ファイルが無い・壊れている場合も従来どおり。
+        state_path = Path(self.settings.data_dir) / "startup_index_state.json"
+        try:
+            benign = json.loads(
+                state_path.read_text(encoding="utf-8")
+            ).get("benign_offset")
+        except Exception:
+            benign = None
+        if isinstance(benign, int) and md_count - idx_count == benign:
+            return {
+                "action": "in_sync",
+                "markdown": md_count,
+                "index": idx_count,
+                "note": f"既知の無害なズレ({benign}件)と一致したため全件走査を省略",
+            }
+
         # 件数が違う。空ファイル・壊れた frontmatter・id 無しの非記憶 .md による
         # 見かけ上のズレかもしれない(scan_all はそれらをスキップする)。無駄な
         # reindex を避けるため、index と同じ「有効な記憶」母集団で正確に数え直す。
         valid_count = sum(1 for _ in self.store.scan_all())
         if valid_count == idx_count:
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.write_text(
+                    json.dumps({"benign_offset": md_count - valid_count}),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass  # 記録は最善努力(次回また全件走査になるだけ)
             return {
                 "action": "in_sync",
                 "markdown": md_count,
