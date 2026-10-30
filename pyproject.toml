@@ -1,6 +1,6 @@
 [project]
 name = "engram"
-version = "0.12.0"
+version = "0.12.1"
 description = "Human-like memory MCP server for AI agents: activation decay, associative recall, error-driven encoding"
 requires-python = ">=3.12"
 # 配布時のつまずきを減らすため、埋め込みモデルの実行系も既定の依存に含める。
@@ -8,7 +8,7 @@ requires-python = ">=3.12"
 # sentence-transformers(torch)は ONNX 未生成時のフォールバック +
 # export-onnx のパリティ基準として残している(将来 extras へ分離予定)。
 dependencies = [
-    "mcp>=1.2",
+    "mcp>=1.2,<2",  # mcp 2.x renamed FastMCP (MCPServer); server.py targets the v1 API
     "sqlite-vec>=0.1.6",
     "numpy>=1.26",
     "python-frontmatter>=1.1",
