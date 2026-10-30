@@ -7,7 +7,8 @@ from pathlib import Path
 
 MEMORY_TYPES = ("knowledge", "preference", "project", "episode")
 TIERS = ("hot", "cold", "superseded", "trash")
-EVENT_KINDS = ("create", "recall_hit", "reinforce", "correction")
+EVENT_KINDS = ("create", "recall_hit", "reinforce", "correction",
+               "implicit_use")  # implicit_use: 申告なしで使われた形跡
 LINK_KINDS = ("explicit", "co_recall", "derived_from", "superseded_by")
 
 
@@ -27,6 +28,7 @@ class MemoryRecord:
     path: Path | None = None     # Markdown ファイルの絶対パス
     content_hash: str = ""       # 本文の sha256(手編集検知用)
     room: str = "common"         # 記憶の部屋(仕事/個人の文脈分離。既定は共通)
+    valence: float = 0.0         # 感情価(-1..1)。負=避けろ(失敗・訂正)、正=近づけ(成功)
 
 
 @dataclass

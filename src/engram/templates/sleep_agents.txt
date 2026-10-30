@@ -1,0 +1,17 @@
+# engram 夜間統合(眠り)のエージェント優先順。1行=1コマンド。モデル非依存。
+# 上から順に試し、終了コード 0 で成功扱い。プロンプト文(sleep_prompt.md を読む指示)が
+# 最後の引数として付加される。モデル・ベンダーを替えるときは、このファイルだけを編集する。
+# 全行失敗した夜は、翌セッションのナッジ(MCP経由・全モデル共通)に自動縮退する。
+#
+# 特別な行 `local-llm` は外部CLIではなく、engram 内蔵のローカルLLM統合(config.toml の
+# llm_url / llm_model。既定は Ollama の gemma)を実行する。Ollama が無ければ静かに次へ進む。
+#
+# 既定は権限旗なし(安全側)。ヘッドレスが権限拒否で失敗するなら、それはナッジ縮退として
+# 設計どおりに動く。強い旗を使うかは人間が判断してコメントを外すこと(自動化に権限バイパスを焼き込まない)。
+claude -p
+codex exec --skip-git-repo-check
+local-llm
+#
+# --- 強い旗の例(人間の判断で有効化) ---
+# claude -p --dangerously-skip-permissions
+# codex exec --skip-git-repo-check --sandbox danger-full-access

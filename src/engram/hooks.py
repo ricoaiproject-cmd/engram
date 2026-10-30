@@ -191,6 +191,20 @@ def _skill_nudge(settings: Settings, now: float | None = None) -> str | None:
         _write_consolidation_state(settings, {"last_skill_nudged_at": ts})
     except OSError:
         return None
+    if settings.skill_autonomy:
+        return (
+            f"(engram スキル化候補) 同じ形の作業を記録した episode が {clusters} "
+            f"クラスタ溜まっています(1クラスタ{settings.skill_min_count}件以上・"
+            "三度ルール)。運用方針は自律作成です: 区切りの良いところで "
+            "skill_candidates を呼び、手順として再利用価値があるクラスタは"
+            "承認を待たずスキル(SKILL.md)を自動作成してよい。置き場所は"
+            "自動生成枠(スキルフォルダの auto-<名前>/、frontmatter に "
+            "auto: true と作成日を明記)。実需の反復か1案件内の反復(デモ・例示)"
+            "かを内容から判断し、迷いは作る側に倒す(多少の誤りは許容・"
+            "使われないものは代謝が引退させる)。作成/見送りの経緯を "
+            "remember(type=knowledge) で記録し、mark_consolidated で"
+            "元 episode を整理すること。"
+        )
     return (
         f"(engram スキル化候補) 同じ形の作業を記録した episode が {clusters} "
         f"クラスタ溜まっています(1クラスタ{settings.skill_min_count}件以上・"
@@ -238,6 +252,191 @@ def _recall_nudge(settings: Settings, session_id: str) -> str | None:
     )
 
 
+def _last_assistant_text(transcript_path, max_chars: int) -> str:
+    """transcript(JSONL)の末尾から直前のアシスタント発話を取り出す。
+
+    毎発話時に呼ばれるため全文は読まない(末尾 64KB のみ)。壊れた行は無視。
+    """
+    try:
+        path = Path(transcript_path)
+        if not transcript_path or not path.is_file():
+            return ""
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > 65536:
+                f.seek(size - 65536)
+            tail = f.read().decode("utf-8", errors="replace")
+        from .transcript import _texts_from_content
+
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(obj, dict) or obj.get("type") != "assistant":
+                continue
+            message = obj.get("message")
+            if not isinstance(message, dict):
+                continue
+            texts = [
+                x for x in _texts_from_content(message.get("content"))
+                if x.strip()
+            ]
+            if texts:
+                return texts[-1].strip()[-max_chars:]
+        return ""
+    except Exception:
+        return ""
+
+
+def _first_prompt_recall(settings: Settings, prompt: str, cwd) -> str | None:
+    """セッション初回の実質発話をクエリに recall を代行実行し、注入文を返す。
+
+    「ナッジ(促し)をやめて配管(代行)にする」(R8.8.12 の SessionStart 代行と
+    同じ思想)の初回発話版。エンジン直呼びなのでモデル非依存。失敗時は None を
+    返し、呼び出し元が従来の recall_nudge 文へ縮退する。
+    """
+    try:
+        from .engine import build_engine
+
+        # セッション最初の1回だけ、意味の網(常駐デーモン)の起動を仕掛ける。
+        # 毎発話でやると起動失敗時にプロセスが積み上がる(R8.8.27の事故)
+        if settings.surface_semantic and settings.surface_autostart_daemon:
+            try:
+                from . import daemon as _daemon
+
+                _daemon.ensure_running(settings)
+            except Exception:
+                pass
+
+        room = resolve_room(cwd, settings.room_paths)
+        engine = build_engine(settings)
+        try:
+            result = engine.recall(
+                query=prompt,
+                mode="fast",
+                limit=settings.first_prompt_recall_limit,
+                room=room,
+                # 機械の巡回で活性度を汲み上げない(R8.8.27)。代行recallが
+                # 毎セッション recall_hit を打つと、活性度の富者益富ループが
+                # 裏口から回り、古参が新参を押し出し続ける(実測:
+                # recall_hit 17,038件のうち相当部分がこの経路)
+                record_hits=False,
+            )
+        finally:
+            engine.db.close()
+        hits = result.get("hits", [])
+        if not hits:
+            return (
+                "(engram 話題想起) 初回発話をクエリに recall を代行実行しましたが、"
+                "関連する記憶は見つかりませんでした。工程が変わったら、その工程名で"
+                " recall を自分で呼ぶこと。"
+            )
+        lines = [
+            "(engram 話題想起) セッション初回の発話をクエリに recall を代行実行した"
+            "結果です(字句一致の surface より深い意味検索)。検証してから使い、"
+            "実際に役立った記憶は reinforce してください:",
+            "",
+        ]
+        for h in hits:
+            content = " ".join((h.get("content") or "").split())
+            if len(content) > 300:
+                content = content[:299] + "…"
+            lines.append(
+                f"- [{h['id']}] ({h.get('type', '?')}/{h.get('room', '?')} "
+                f"score {h.get('score', 0):.2f}) {content}"
+            )
+        lines.append("")
+        lines.append(
+            "・これは初回発話の1回きりです。工程(調査→実装→レビュー等)が変わったら、"
+            "その工程名で recall を呼び直すこと。"
+        )
+        return "\n".join(lines)
+    except Exception as e:
+        _log(settings, f"first-prompt recall 失敗(ナッジへ縮退): {e!r}")
+        return None
+
+
+def _detect_implicit_use(settings: Settings, session_id: str,
+                         assistant_texts: list[str]) -> int:
+    """浮上させた記憶が「申告なしに使われた」形跡を弱く記録する。
+
+    reinforce は申告制なので「役立ったが報告し忘れた」を測れない。この穴が
+    命中率を下限値にし、常連抑制の誤爆も生む。SessionEnd で、そのセッションに
+    浮上させた記憶の特徴語がアシスタント発話に現れていたら implicit_use を打つ。
+
+    特徴語は「記憶の本文にあり、かつ一般的すぎない語」を字句的に拾うだけ
+    (埋め込み不使用)。戻り値は記録した件数。
+    """
+    if not settings.implicit_use_detect or not assistant_texts:
+        return 0
+    try:
+        import sqlite3
+
+        from .surface import _SESSION_ID_SAFE, _surface_dir
+
+        safe = _SESSION_ID_SAFE.sub("_", session_id) or "unknown"
+        state = _surface_dir(settings) / f"session-{safe}.json"
+        ids = json.loads(state.read_text(encoding="utf-8")).get("surfaced", [])
+        if not ids:
+            return 0
+
+        said = " ".join(assistant_texts)
+        conn = sqlite3.connect(str(settings.db_path))
+        try:
+            conn.execute("PRAGMA busy_timeout=2000")
+            ph = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT memory_id, content FROM fts_memories "
+                f"WHERE memory_id IN ({ph})", ids,
+            ).fetchall()
+            hits = 0
+            now = time.time()
+            for mid, content in rows:
+                terms = _distinctive_terms(content or "")
+                if not terms:
+                    continue
+                matched = sum(1 for term in terms if term in said)
+                if matched >= settings.implicit_use_min_terms:
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO access_events(memory_id, ts, kind, "
+                            "weight) VALUES (?,?,?,?)",
+                            (mid, now, "implicit_use",
+                             settings.implicit_use_weight),
+                        )
+                    hits += 1
+            return hits
+        finally:
+            conn.close()
+    except Exception as e:
+        _log(settings, f"implicit-use 検出失敗: {e!r}")
+        return 0
+
+
+def _distinctive_terms(content: str, *, limit: int = 12) -> list[str]:
+    """本文から特徴語(長めのカタカナ・英数字・漢字列)を拾う。
+
+    一般語を拾わないよう長さで足切りする。完全な形態素解析はしない
+    (フックは軽量経路であり、ここでの目的は「同じ話をしていたか」の粗い判定)。
+    """
+    import re as _re
+
+    terms = _re.findall(
+        r"[A-Za-z][A-Za-z0-9_.-]{3,}|[ァ-ヴー]{4,}|[一-龥]{3,}", content
+    )
+    seen: list[str] = []
+    for term in terms:
+        if term not in seen:
+            seen.append(term)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
 def run_session_end(stdin_text: str | None = None) -> int:
     """SessionEnd フック本体。常に 0 を返す(セッション終了を妨げない)。"""
     try:
@@ -260,35 +459,95 @@ def run_session_end(stdin_text: str | None = None) -> int:
             _log(settings, f"session-end {session_id}: 符号化済み、スキップ")
             return 0
 
-        from .transcript import build_episode, extract_messages
+        from .transcript import (
+            build_episodes,
+            estimate_valence,
+            extract_messages,
+        )
 
         messages = extract_messages(transcript_path)
         project = Path(cwd or messages.get("cwd") or "").name
-        episode = build_episode(
+        episodes = build_episodes(
             messages,
             date_str=datetime.date.today().isoformat(),
             project=project,
             min_chars=settings.auto_encode_min_chars,
+            segment_user_turns=settings.encode_segment_user_turns,
         )
-        if episode is None:
+        if not episodes:
             _log(settings, f"session-end {session_id}: 中身が薄いため記録せず")
             return 0
+        valence = estimate_valence(messages.get("user_texts", []))
 
         room = resolve_room(cwd or messages.get("cwd"), settings.room_paths)
+
+        # (G) 暗黙の使用検出: 浮上させた記憶の特徴語がアシスタント発話に
+        # 現れていたら、申告が無くても「使われた」として弱く記録する
+        n_implicit = _detect_implicit_use(
+            settings, session_id, messages.get("assistant_texts") or []
+        )
+        if n_implicit:
+            _log(settings, f"session-end {session_id}: 暗黙の使用 {n_implicit}件")
+
+        # (観察のみ)アシスタント発話を手がかりに shadow surface を流す。
+        # assistant_cue_mode="shadow" のときだけ(active は毎発話時に本番注入
+        # するため、ここでの二重ログは作らない)
+        if (settings.assistant_cue_mode == "shadow"
+                and settings.surface_mode != "off"):
+            try:
+                cue = " ".join(messages.get("assistant_texts") or [])[
+                    -settings.assistant_cue_max_chars:
+                ]
+                if cue.strip():
+                    from .surface import run_surface
+
+                    run_surface(
+                        cue,
+                        settings=settings,
+                        room=room,
+                        session_id=f"{session_id}#assistant",
+                        mode="shadow",
+                    )
+            except Exception as e:
+                _log(settings, f"assistant-cue shadow 失敗: {e!r}")
 
         # ここで初めて重い依存(埋め込みモデル)をロードする。セッション終了後
         # なのでユーザーの操作は妨げない
         from .engine import build_engine
 
         engine = build_engine(settings)
-        result = engine.remember(
-            content=episode,
-            type="episode",
-            importance=settings.auto_episode_importance,
-            tags=["auto", "session"],
-            source="auto-encode",
-            room=room,
-        )
+        if len(episodes) == 1:
+            results = [
+                engine.remember(
+                    content=episodes[0],
+                    type="episode",
+                    importance=settings.auto_episode_importance,
+                    tags=["auto", "session"],
+                    source="auto-encode",
+                    room=room,
+                    valence=valence,
+                )
+            ]
+        else:
+            # 分割パートは意図的に別記録なので重複検知を通さない(テンプレ骨格の
+            # 類似で併合される実例あり)。パート同士は時系列リンクで鎖にする
+            results = []
+            prev_id: str | None = None
+            for ep in episodes:
+                r = engine._remember_direct(
+                    content=ep,
+                    type="episode",
+                    importance=settings.auto_episode_importance,
+                    tags=["auto", "session"],
+                    source="auto-encode",
+                    related_ids=[prev_id] if prev_id else None,
+                    room=room,
+                    now=time.time(),
+                    valence=valence,
+                )
+                prev_id = r.get("id")
+                results.append(r)
+        result = results[-1]
         # 統合候補の棚卸し(エンジン構築済みなので追加コストは僅か)。
         # 候補数を状態ファイルへ書き、次セッションの user-prompt が促す
         if settings.consolidate_nudge:
@@ -322,7 +581,8 @@ def run_session_end(stdin_text: str | None = None) -> int:
         _log(
             settings,
             f"session-end {session_id}: {result.get('status')} "
-            f"id={result.get('id')} room={room}",
+            f"episodes={len(results)} id={result.get('id')} "
+            f"room={room} valence={valence:+.2f}",
         )
     except Exception as e:
         _log(settings, f"session-end エラー: {e!r}")
@@ -357,10 +617,15 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
 
         context_parts: list[str] = []
 
-        # 着手前 recall の促し(セッション初回のみ。surface とは独立)
+        # 着手前 recall(セッション初回のみ。surface とは独立)。
+        # 既定は「代行」(発話文で recall を実行して結果を注入)、失敗時は
+        # 従来の「促し」へ縮退する。マーカー管理は _recall_nudge に相乗り
         recall_nudge = _recall_nudge(settings, session_id)
         if recall_nudge:
-            context_parts.append(recall_nudge)
+            injected = None
+            if settings.first_prompt_recall:
+                injected = _first_prompt_recall(settings, stripped, cwd)
+            context_parts.append(injected or recall_nudge)
 
         if settings.surface_mode != "off":
             room = resolve_room(cwd, settings.room_paths)
@@ -374,8 +639,48 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
                 session_id=session_id,
             )
 
-            if settings.surface_mode == "active" and result.get("surfaced_items"):
-                context_parts.append(format_context(result["surfaced_items"]))
+            if settings.surface_mode == "active" and (result.get("surfaced_items") or result.get("fringe_items")):
+                context_parts.append(format_context(result.get("surfaced_items") or [],
+                                                    fringe_items=result.get("fringe_items") or []))
+
+            # 自分の思考をキューにする連想(assistant cue・本番)。直前の
+            # アシスタント発話を手がかりに surface し、浮上分を追加注入する。
+            # 同じ session_id を使うので発話由来との重複浮上は自動で抑止される
+            if settings.assistant_cue_mode == "active":
+                cue = _last_assistant_text(
+                    data.get("transcript_path", ""),
+                    settings.assistant_cue_max_chars,
+                )
+                if cue:
+                    cue_result = run_surface(
+                        cue,
+                        settings=settings,
+                        room=room,
+                        session_id=session_id,
+                        log_extra={"cue": "assistant"},
+                    )
+                    if (settings.surface_mode == "active"
+                            and cue_result.get("surfaced_items")):
+                        context_parts.append(format_context(
+                            cue_result["surfaced_items"],
+                            lead=(
+                                "(engram 連想想起)以下は、直前のあなた自身の"
+                                "思考(応答)から連想して浮上した記憶です。"
+                            ),
+                        ))
+
+        # 媒体の自発的想起(0.24)。文章の surface とは別の棚(画像・文書)。索引係が
+        # 寝ていれば起こすだけで今回は出さない。失敗しても発話を妨げない
+        if getattr(settings, "media_enabled", False) and getattr(settings, "media_surface_mode", "off") != "off":
+            try:
+                from .media import format_surface, surface as media_surface
+
+                room = resolve_room(cwd, settings.room_paths)
+                mres = media_surface(settings, stripped, room=room, session_id=session_id)
+                if settings.media_surface_mode == "active" and mres.get("items"):
+                    context_parts.append(format_surface(mres["items"]))
+            except Exception as e:  # 媒体は必須ではない
+                _log(settings, f"media surface スキップ: {e!r}")
 
         # 統合の促し(surface とは独立。consolidate_nudge 設定でゲート)
         nudge = _consolidation_nudge(settings)

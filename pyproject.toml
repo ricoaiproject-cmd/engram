@@ -1,6 +1,6 @@
 [project]
 name = "engram"
-version = "0.12.1"
+version = "0.25.2"
 description = "Human-like memory MCP server for AI agents: activation decay, associative recall, error-driven encoding"
 requires-python = ">=3.12"
 # 配布時のつまずきを減らすため、埋め込みモデルの実行系も既定の依存に含める。
@@ -15,15 +15,31 @@ dependencies = [
     "python-ulid>=2.7",
     "sentence-transformers>=3.0",
     "onnxruntime>=1.20",
+    "onnx>=1.16",  # engram export-onnx(torch.onnx.export)が要る。無いと新規の環境で変換に失敗する
     "tokenizers>=0.20",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# 媒体の棚(画像・音声・動画・文書)の索引係。EmbeddingGemma 2 が sentence-transformers 6.1+ を要るため
+# 本体とは別の venv に `pip install engram[media]` で入れる(engram media setup が行う)
+media = [
+    "sentence-transformers>=6.1",
+    "torch>=2.4",
+    "torchvision",
+    "pillow>=10",
+    "av>=12",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "pymupdf>=1.24",
+]
+# メール添付の取り込み(読み取り専用の Gmail API)
+mail = ["google-api-python-client>=2.100", "google-auth-oauthlib>=1.2"]
 
 [project.scripts]
 engram = "engram.cli:main"
 engram-mcp = "engram.server:main"
+engram-media = "engram.media_worker:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -175,3 +175,95 @@ def test_touch_resets_idle_timer(monkeypatch):
     server._touch()  # 直前にツールが呼ばれた
     assert _maybe_idle_unload(600) is False
     assert emb.loaded
+
+
+# --- R8.10.23: 裏の reindex 中は解放しない / 起動時点検は1プロセスだけ ---
+
+
+def test_busy_blocks_idle_unload(monkeypatch):
+    """裏で reindex 中(_busy)は、アイドル時間を過ぎていても解放しない。"""
+    emb = _FakeUnloadableEmbedder(loaded=True)
+    _set_idle_state(monkeypatch, _FakeEngine(emb), idle_elapsed=9999)
+    monkeypatch.setattr(server, "_busy_count", 0)
+    with server._busy():
+        # _busy に入っただけではタイマーは戻らない(長い reindex を想定)
+        monkeypatch.setattr(server, "_last_activity", time.monotonic() - 9999)
+        assert _maybe_idle_unload(600) is False
+        assert emb.unload_calls == 0
+    assert server._busy_count == 0
+
+
+def test_busy_exit_restarts_idle_timer(monkeypatch):
+    """_busy を抜けた時点からアイドル計測を始める(抜けた直後には解放しない)。"""
+    emb = _FakeUnloadableEmbedder(loaded=True)
+    _set_idle_state(monkeypatch, _FakeEngine(emb), idle_elapsed=9999)
+    monkeypatch.setattr(server, "_busy_count", 0)
+    with server._busy():
+        pass
+    assert _maybe_idle_unload(600) is False
+    assert emb.loaded
+
+
+def test_busy_count_restored_on_exception(monkeypatch):
+    monkeypatch.setattr(server, "_busy_count", 0)
+    try:
+        with server._busy():
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert server._busy_count == 0
+
+
+def test_startup_lock_second_holder_is_refused(tmp_path):
+    """同じマシンで2つ目の点検はロックを取れない(待たずに False)。"""
+    with server._startup_index_lock(tmp_path) as first:
+        assert first is True
+        with server._startup_index_lock(tmp_path) as second:
+            assert second is False
+    # 1つ目が抜けたら次は取れる
+    with server._startup_index_lock(tmp_path) as again:
+        assert again is True
+
+
+def test_startup_lock_without_data_dir_passes(tmp_path):
+    with server._startup_index_lock(None) as ok:
+        assert ok is True
+
+
+class _CheckSettings:
+    perf_log = False
+    startup_index_check = "auto"
+
+    def __init__(self, data_dir) -> None:
+        self.data_dir = data_dir
+
+
+class _CheckEngine:
+    def __init__(self, data_dir) -> None:
+        self.settings = _CheckSettings(data_dir)
+        self.calls = 0
+        self.busy_seen = None
+
+    def check_index_freshness(self, mode="auto"):
+        self.calls += 1
+        self.busy_seen = server._busy_count
+        return {"action": "in_sync"}
+
+
+def test_startup_check_runs_under_busy(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_busy_count", 0)
+    eng = _CheckEngine(tmp_path)
+    server._run_startup_index_check(eng)
+    assert eng.calls == 1
+    assert eng.busy_seen == 1  # 点検中は解放が止まっている
+    assert server._busy_count == 0
+
+
+def test_startup_check_skipped_when_other_process_holds_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_busy_count", 0)
+    eng = _CheckEngine(tmp_path)
+    with server._startup_index_lock(tmp_path) as held:
+        assert held is True
+        server._run_startup_index_check(eng)
+    assert eng.calls == 0  # 他が点検中なので自分はやらない
+    assert server._busy_count == 0

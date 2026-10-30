@@ -18,6 +18,7 @@ mcp 公式 SDK の FastMCP(stdio)で engine の操作をツールとして公開
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
@@ -50,6 +51,82 @@ def _touch() -> None:
     _last_activity = time.monotonic()
 
 
+# 裏で埋め込みを使う長い処理(起動時 reindex・reindex ツール)の実行数。
+# 0 より大きい間はアイドル解放しない。
+# 背景(R8.10.23 実測): 起動時 reindex は _touch() を通らないため、600 秒を
+# 過ぎると解放スレッドが毎分モデルを捨て、reindex は次の1件のために ONNX
+# セッションを作り直す(全コアを使う重い処理)。読み込み↔解放の空回りで
+# reindex が終わらず、2プロセスで PC 全体の CPU の 72% を焼き続けた。
+_busy_count = 0
+_busy_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _busy():
+    """この間はアイドル解放を止める。抜けたらそこからアイドル計測を始める。"""
+    global _busy_count
+    with _busy_lock:
+        _busy_count += 1
+    try:
+        yield
+    finally:
+        with _busy_lock:
+            _busy_count -= 1
+        _touch()
+
+
+@contextlib.contextmanager
+def _startup_index_lock(data_dir: Path | None):
+    """起動時の索引点検を同じマシンの1プロセスだけに通すロック(待たない)。
+
+    index.db はマシンに1つで全プロセスが共有するため、点検と reindex は誰か
+    1プロセスがやれば足りる。取れたら True、他プロセスが点検中なら False を
+    yield する。ロックは OS のファイルロックなので、持ち主のプロセスが落ちれば
+    自動で外れる(古いロックが残って永久に点検されない事故は起きない)。
+    data_dir が無い・ロックファイルを作れない場合はロック無しで通す(従来どおり)。
+    """
+    if data_dir is None:
+        yield True
+        return
+    try:
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        fh = open(Path(data_dir) / "startup_index.lock", "a+b")
+    except OSError:
+        yield True
+        return
+    acquired = False
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError:
+            acquired = False
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        fh.close()
+
+
 def _get_engine() -> MemoryEngine:
     """エンジンを遅延構築して返す(スレッド安全)。"""
     global _engine
@@ -57,9 +134,31 @@ def _get_engine() -> MemoryEngine:
         return _engine
     with _engine_lock:
         if _engine is None:
-            _engine = build_engine()
+            _engine = build_engine(embedder=_make_server_embedder())
             _run_startup_index_check(_engine)
     return _engine
+
+
+def _make_server_embedder():
+    """MCP サーバー用の埋め込み部品を選ぶ。
+
+    ONNX 経路で embed_via_daemon が有効なら、計算を共有デーモンに頼む窓口
+    (DaemonEmbedder)にする。モデルはデーモン1つだけが持ち、セッションの数だけ
+    積み上がらない。torch 経路・無効化時・ENGRAM_DISABLE_DAEMON(テスト)の
+    ときは従来どおり手元の実行系を返す。
+    """
+    from .config import get_settings
+    from .embedder import DaemonEmbedder, OnnxRuriEmbedder, make_embedder
+
+    settings = get_settings()
+    local = make_embedder(settings)
+    if (
+        getattr(settings, "embed_via_daemon", True)
+        and isinstance(local, OnnxRuriEmbedder)
+        and not os.environ.get("ENGRAM_DISABLE_DAEMON")
+    ):
+        return DaemonEmbedder(settings, local)
+    return local
 
 
 def _timed(name: str):
@@ -85,7 +184,16 @@ def _run_startup_index_check(engine: MemoryEngine) -> None:
 
     try:
         mode = getattr(engine.settings, "startup_index_check", "auto")
-        res = engine.check_index_freshness(mode=mode)
+        data_dir = getattr(engine.settings, "data_dir", None)
+        with _busy(), _startup_index_lock(data_dir) as acquired:
+            if not acquired:
+                print(
+                    "engram: startup index check skipped "
+                    "(another engram process on this machine is checking)",
+                    file=sys.stderr,
+                )
+                return
+            res = engine.check_index_freshness(mode=mode)
         action = res.get("action")
         if action == "reindexed":
             print(
@@ -125,11 +233,13 @@ def remember(
     source: str = "unknown",
     related_ids: list[str] | None = None,
     room: str | None = None,
+    valence: float = 0.0,
 ) -> dict:
     """新しい記憶を保存する。
 
     タスク中に重要な情報(事実・好み・プロジェクト状況・出来事)を発見したとき呼ぶ。
     importance は 1〜10 で文脈の重要度を自己採点する。
+    valence は -1..1 の感情価(負=避けろ/失敗・訂正、正=近づけ/成功。省略可)。
     既存の類似記憶(cos が dup_threshold=0.95 以上)がある場合は重複強化して返す。
     room は通常指定不要(作業ディレクトリから自動判定)。どの文脈でも使う
     普遍的な記憶だけ room="common" を明示する。
@@ -144,6 +254,7 @@ def remember(
             source=source,
             related_ids=related_ids,
             room=room if room is not None else _default_room(),
+            valence=valence,
         )
 
 
@@ -155,6 +266,7 @@ def recall(
     type: str | None = None,
     record_hits: bool = True,
     room: str | None = None,
+    modality: str | None = None,
 ) -> dict:
     """記憶を検索して返す。
 
@@ -165,6 +277,11 @@ def recall(
     「確かに記録したはずなのに fast/deep で出ない」沈んだ記憶を掘り起こす最終手段。
     room は通常指定不要(現在の部屋+共通だけを検索する)。room="*" で全部屋を
     横断検索できるが、仕事/個人の分離を壊さないよう必要時のみ使うこと。
+    modality を "image" / "video" / "audio" / "document" / "media"(全種別) にすると、
+    文章の記憶ではなく媒体の棚(画像・音声・動画・文書ファイルを見た目・音で索引した別の棚)を
+    言葉で探す。結果の各 hit に path(ファイルの場所)・kind・caption(説明文)・page が付く。
+    「前に作ったあの図解」「あの画面写真」「◯◯から届いた見積書のPDF」のような、ファイルを
+    探す問いに使う。索引係が寝ていると初回は起動待ち(最大15秒)で空振りすることがある。
     """
     engine = _get_engine()
     with _timed("recall"):
@@ -174,8 +291,22 @@ def recall(
             limit=limit,
             type=type,
             record_hits=record_hits,
+            modality=modality,
             room=room if room is not None else _default_room(),
         )
+
+
+@mcp.tool()
+def read(ids: list[str]) -> dict:
+    """id を指定して記憶の本文を読む。
+
+    自発的想起の「縁」(id と要旨1行だけが差し込まれる弱い想起)から、今の話に効きそうな
+    ものを選んで本文を取るための入口。読んだ記憶には弱い使用記録(recall_hit)が付く。
+    役立ったら reinforce で申告する(read だけでは強い強化にならない)。
+    """
+    engine = _get_engine()
+    with _timed("read"):
+        return engine.read(ids=ids)
 
 
 @mcp.tool()
@@ -321,7 +452,7 @@ def reindex() -> dict:
     差異のある記憶だけ再埋め込みするため、全件再構築より高速。
     """
     engine = _get_engine()
-    with _timed("reindex"):
+    with _timed("reindex"), _busy():
         return engine.reindex()
 
 
@@ -334,6 +465,124 @@ def stats() -> dict:
     engine = _get_engine()
     with _timed("stats"):
         return engine.stats()
+
+
+@mcp.tool()
+def hypothesis_seeds(n: int = 3) -> dict:
+    """仮説の種になる記憶の組を返す(仮説サイクルの1歩目)。
+
+    近すぎず遠すぎない記憶の組を選ぶ。過去に当たりやすかった組み合わせの種類ほど選ばれやすい。
+    返った組を読み、2つを組み合わせると言えそうなこと(仮説)を考えて hypothesize で書く。
+    既定では共通の部屋の記憶だけを使う(Web で確かめるため、仕事の記憶は入れない)。
+    """
+    engine = _get_engine()
+    with _timed("hypothesis_seeds"):
+        from . import hypothesis as _h
+
+        return _h.hypothesis_seeds(engine, n=n)
+
+
+@mcp.tool()
+def hypothesize(
+    claim: str,
+    source_ids: list[str],
+    falsify_if: str,
+    test_plan: str = "",
+    due: str | None = None,
+    source: str = "unknown",
+    origin: str = "",
+) -> dict:
+    """記憶の組み合わせから立てた仮説を書く(未決の仮説として持ち続け、期限に確かめる)。
+
+    claim は確かめられる形の主張。source_ids は元にした記憶 ID(2件以上)。
+    falsify_if は「外れたと分かる条件」で、書けない仮説は受け付けない。
+    test_plan は確かめ方(どんな記事・論文・公式資料で確かめるか)。due は期限
+    (YYYY-MM-DD か日数。既定3日後)。書いた日には判定できない(自己採点の防止)。
+    """
+    engine = _get_engine()
+    with _timed("hypothesize"):
+        from . import hypothesis as _h
+
+        return _h.hypothesize(engine, claim, source_ids, falsify_if, test_plan,
+                              due=due, source=source, origin=origin)
+
+
+@mcp.tool()
+def hypotheses(status: str = "open", limit: int = 20) -> dict:
+    """仮説の一覧。status は open(未決)/ due(期限が来て今日判定してよいもの)/ resolved / all。
+
+    未決の仮説には evidence_candidates(仮説の後に入った、意味の近い記憶)が付く。
+    summary に答え合わせ率・当たり率・種類の組ごとの成績が入る。
+    """
+    engine = _get_engine()
+    with _timed("hypotheses"):
+        from . import hypothesis as _h
+
+        return _h.list_hypotheses(engine, status=status, limit=limit)
+
+
+@mcp.tool()
+def resolve_hypothesis(
+    id: str,
+    verdict: str,
+    evidence: str,
+    evidence_urls: list[str] | None = None,
+    evidence_ids: list[str] | None = None,
+    note: str = "",
+    judge: str = "model",
+    source: str = "unknown",
+) -> dict:
+    """仮説に判定を付ける。verdict は 当たり / 外れ / 判定不能。
+
+    evidence は根拠の要約、evidence_urls は確かめた記事・論文の URL。
+    当たり → 検証済みの知見(knowledge)を新しく作り、仮説と元の記憶に結ぶ(元の記憶を温める)。
+    外れ → correct と同じく誤りごと深く刻む。判定不能 → 期限を延ばして再挑戦(上限で打ち切り)。
+    judge はモデルの判定なら "model"(既定)。ユーザーの判断なら "user"。
+    """
+    engine = _get_engine()
+    with _timed("resolve_hypothesis"):
+        from . import hypothesis as _h
+
+        return _h.resolve(engine, id, verdict, evidence, evidence_urls=evidence_urls,
+                          evidence_ids=evidence_ids, note=note, judge=judge, source=source)
+
+
+@mcp.tool()
+def remember_file(path: str, note: str | None = None, room: str | None = None) -> dict:
+    """ファイル1件(画像・音声・動画・PDF/Office 文書)を媒体の棚に今すぐ覚える。
+
+    「このファイル覚えて」「この画像をあとで探せるようにして」と頼まれたとき、または作業中に
+    作った成果物(スライド画像・図解・録音)を後から言葉で探せるようにしたいときに呼ぶ。
+    フォルダ単位の索引(夜間の差分)を待たずに1件だけ即時に索引する。note は人が付けた短い
+    説明(あれば説明文として一緒に覚える)。room は省略時に作業ディレクトリから判定。
+    ファイル本体は動かさない(場所を覚えるだけ)。見つけるときは recall(modality=...)。
+    """
+    engine = _get_engine()
+    with _timed("remember_file"):
+        from . import media as _media
+
+        res = _media.index_path(engine.settings, path, room=room or _default_room(), source="manual",
+                                source_meta={"note": note} if note else None)
+        if res.get("ok") and note:
+            for it in res.get("items") or []:
+                if it and not it.get("caption"):
+                    try:
+                        from .media_schema import MediaIndex
+
+                        MediaIndex.open(engine.settings.db_path).set_caption(it["id"], note)
+                    except Exception:
+                        pass
+        return res
+
+
+@mcp.tool()
+def media_status() -> dict:
+    """媒体の棚(画像・音声・動画・文書の索引)の状態。索引係の稼働・件数・対象フォルダ・索引作成の進み具合。"""
+    engine = _get_engine()
+    with _timed("media_status"):
+        from . import media as _media
+
+        return _media.status(engine.settings)
 
 
 def _preload() -> None:
@@ -399,6 +648,8 @@ def _maybe_idle_unload(idle_sec: float) -> bool:
     embedder = engine.embedder
     unload = getattr(embedder, "unload", None)
     if unload is None or not getattr(embedder, "loaded", False):
+        return False
+    if _busy_count > 0:  # 裏の reindex 中は使用中扱い(空回り防止。_busy 参照)
         return False
     idle = time.monotonic() - _last_activity
     if idle < idle_sec:

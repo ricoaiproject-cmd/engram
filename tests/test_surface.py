@@ -162,7 +162,11 @@ def test_run_surface_threshold_filters(tmp_path):
     engine.remember("予算要求の書式は財務課の様式7を使うこと", "knowledge", 7)
     engine.db.close()
 
-    result = run_surface("予算要求の書式", settings=settings, session_id="s1")
+    # 注: 発話が記憶の完全な部分文字列だと関連度=1.0、作成直後は活性度も
+    # ほぼ1.0なので、重要度項を外した surface ではスコアが1.0に達し、
+    # 0.99では止まらない(正しい挙動)。部分一致の発話で検証する
+    result = run_surface("予算要求の書式について教えて", settings=settings,
+                         session_id="s1")
     assert result["candidates"]          # 候補はある
     assert result["surfaced"] == []      # が、閾値が高すぎて浮上しない
 

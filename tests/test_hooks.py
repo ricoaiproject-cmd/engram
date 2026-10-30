@@ -18,6 +18,7 @@ from engram.hooks import (
     run_session_end,
     run_user_prompt,
 )
+from engram.hooks import _first_prompt_recall as _REAL_FIRST_PROMPT_RECALL
 from engram.setup import (
     merge_config_toml,
     read_config_toml,
@@ -38,6 +39,12 @@ def engram_home(tmp_path, monkeypatch):
     monkeypatch.setenv("ENGRAM_HOME", str(home))
     monkeypatch.delenv("ENGRAM_MEMORIES_DIR", raising=False)
     monkeypatch.delenv("ENGRAM_DATA_DIR", raising=False)
+    # 初回発話の recall 代行は既定で殺す(None=ナッジへ縮退)。既存テスト群は
+    # ナッジ文の挙動を検証しており、代行は埋め込みロードを伴うため
+    # TestFirstPromptRecall だけで明示的に検証する
+    monkeypatch.setattr(
+        "engram.hooks._first_prompt_recall", lambda *a, **k: None
+    )
     return home
 
 
@@ -573,12 +580,12 @@ def test_config_toml_roundtrip_with_room_paths(tmp_path):
     write_config_toml(cfg, {
         "memories_dir": "C:/mem",
         "room_paths": {"C:/Users/me/work": "work",
-                       "H:/マイドライブ/個人": "personal"},
+                       "D:/同期フォルダ/個人": "personal"},
     })
     data = read_config_toml(cfg)
     assert data["memories_dir"] == "C:/mem"
     assert data["room_paths"]["C:/Users/me/work"] == "work"
-    assert data["room_paths"]["H:/マイドライブ/個人"] == "personal"
+    assert data["room_paths"]["D:/同期フォルダ/個人"] == "personal"
 
     # merge してもセクションが保持される
     merge_config_toml(cfg, {"surface_mode": "active"})
@@ -703,3 +710,244 @@ class TestRecallNudge:
         marker = engram_home / "surface" / "session-sess-rn-6-nudged.json"
         assert marker.is_file()
         assert marker.match("session-*.json")
+
+
+# ---------------------------------------------------------------------------
+# 初回発話の recall 代行(first prompt recall)と assistant cue(Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestFirstPromptRecall:
+    def test_direct_returns_hits_text(self, engram_home, monkeypatch):
+        """代行本体: 発話をクエリに recall し、注入文を組み立てる。"""
+        import engram.engine
+
+        monkeypatch.setattr(engram.engine, "build_engine", _fake_build_engine)
+        engine = _fake_build_engine()
+        r = engine.remember(
+            "予算要求の書式は財務課の様式7を使うこと", "knowledge", 7
+        )
+        engine.db.close()
+
+        settings = get_settings()
+        text = _REAL_FIRST_PROMPT_RECALL(
+            settings, "予算要求の書式ってどうだったっけ", ""
+        )
+        assert text is not None
+        assert "(engram 話題想起)" in text
+        assert r["id"] in text
+
+    def test_direct_fallback_none_on_failure(self, engram_home, monkeypatch):
+        """エンジン構築が失敗したら None(呼び出し元がナッジへ縮退)。"""
+        import engram.engine
+
+        def _boom(*a, **k):
+            raise RuntimeError("no model")
+
+        monkeypatch.setattr(engram.engine, "build_engine", _boom)
+        settings = get_settings()
+        assert _REAL_FIRST_PROMPT_RECALL(
+            settings, "何か長めの発話です", ""
+        ) is None
+
+    def test_user_prompt_injects_recall_instead_of_nudge(
+        self, engram_home, monkeypatch, capsys
+    ):
+        """配線: 代行が成功したら、その文がナッジ文の代わりに注入される。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            "engram.hooks._first_prompt_recall",
+            lambda *a, **k: "(engram 話題想起) テスト注入テキスト",
+        )
+        stdin = json.dumps({
+            "session_id": "sess-fpr-1",
+            "prompt": "予算要求の準備を始めたい",
+            "cwd": "",
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "テスト注入テキスト" in ctx
+        assert "想起の促し" not in ctx  # ナッジ文ではなく代行結果が使われた
+
+    def test_user_prompt_falls_back_to_nudge(
+        self, engram_home, capsys
+    ):
+        """代行が None(フィクスチャの既定)ならナッジ文へ縮退する。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = 'off'\n", encoding="utf-8"
+        )
+        stdin = json.dumps({
+            "session_id": "sess-fpr-2",
+            "prompt": "予算要求の準備を始めたい",
+            "cwd": "",
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "想起の促し" in ctx
+
+
+class TestAssistantCueShadow:
+    def test_session_end_logs_assistant_cue(
+        self, engram_home, tmp_path, monkeypatch
+    ):
+        (engram_home / "config.toml").write_text(
+            "assistant_cue_mode = " + chr(39) + "shadow" + chr(39) + chr(10),
+            encoding="utf-8",
+        )
+        """SessionEnd でアシスタント発話をキューに shadow surface が走り、
+        session_id に #assistant を付けてログされる。"""
+        import engram.engine
+        monkeypatch.setattr(engram.engine, "build_engine", _fake_build_engine)
+
+        # surface の候補になる記憶(hot・非episode)を先に用意しておく
+        engine = _fake_build_engine()
+        engine.remember(
+            "予算要求の書式は財務課の様式7を使うこと", "knowledge", 7
+        )
+        engine.db.close()
+
+        transcript = tmp_path / "t.jsonl"
+        objs = [
+            {"type": "user", "cwd": "C:/proj/demo",
+             "message": {"role": "user",
+                         "content": "予算要求の相談です。よろしくお願いします"}},
+            {"type": "assistant",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text",
+                                      "text": "予算要求の書式と様式7を確認しました。"}]}},
+        ]
+        with transcript.open("w", encoding="utf-8") as f:
+            for o in objs:
+                f.write(json.dumps(o, ensure_ascii=False) + chr(10))
+        stdin = json.dumps({
+            "session_id": "sess-ac-1",
+            "transcript_path": str(transcript),
+            "cwd": "C:/proj/demo",
+        })
+        assert run_session_end(stdin) == 0
+
+        log = engram_home / "surface" / "surface_log.jsonl"
+        assert log.is_file()
+        entries = [
+            json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines()
+        ]
+        cues = [e for e in entries if e["session_id"].endswith("#assistant")]
+        assert cues, "assistant cue の shadow ログが無い"
+        assert cues[0]["mode"] == "shadow"
+
+    def test_session_end_no_cue_when_disabled(
+        self, engram_home, tmp_path, monkeypatch
+    ):
+        (engram_home / "config.toml").write_text(
+            "assistant_cue_mode = " + chr(39) + "off" + chr(39) + chr(10),
+            encoding="utf-8"
+        )
+        import engram.engine
+        monkeypatch.setattr(engram.engine, "build_engine", _fake_build_engine)
+
+        transcript = tmp_path / "t.jsonl"
+        _write_transcript(transcript)
+        stdin = json.dumps({
+            "session_id": "sess-ac-2",
+            "transcript_path": str(transcript),
+            "cwd": "C:/proj/demo",
+        })
+        assert run_session_end(stdin) == 0
+        log = engram_home / "surface" / "surface_log.jsonl"
+        if log.is_file():
+            entries = [
+                json.loads(line)
+                for line in log.read_text(encoding="utf-8").splitlines()
+            ]
+            assert not [
+                e for e in entries if e["session_id"].endswith("#assistant")
+            ]
+
+
+class TestAssistantCueActive:
+    def test_user_prompt_injects_association_from_own_thought(
+        self, engram_home, tmp_path, capsys
+    ):
+        """本番: 直前のアシスタント発話をキューに連想想起が注入される。"""
+        (engram_home / "config.toml").write_text(
+            "surface_mode = " + chr(39) + "active" + chr(39) + chr(10)
+            + "assistant_cue_mode = " + chr(39) + "active" + chr(39) + chr(10),
+            encoding="utf-8",
+        )
+        engine = _fake_build_engine()
+        engine.remember(
+            "予算要求の書式は財務課の様式7を使うこと", "knowledge", 7
+        )
+        engine.db.close()
+
+        transcript = tmp_path / "t.jsonl"
+        objs = [
+            {"type": "assistant",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text",
+                                      "text": "次は予算要求の様式7の書式を確認します。"}]}},
+        ]
+        with transcript.open("w", encoding="utf-8") as f:
+            for o in objs:
+                f.write(json.dumps(o, ensure_ascii=False) + chr(10))
+
+        stdin = json.dumps({
+            "session_id": "sess-aca-1",
+            # 発話は記憶と無関係(発話由来では浮上しない)
+            "prompt": "今日の天気はどうなりそうかな、外出の予定がある",
+            "cwd": "C:/anywhere",
+            "transcript_path": str(transcript),
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "連想想起" in ctx
+        assert "様式7" in ctx
+
+    def test_off_mode_does_not_inject_association(
+        self, engram_home, tmp_path, capsys
+    ):
+        (engram_home / "config.toml").write_text(
+            "surface_mode = " + chr(39) + "active" + chr(39) + chr(10)
+            + "assistant_cue_mode = " + chr(39) + "off" + chr(39) + chr(10),
+            encoding="utf-8",
+        )
+        stdin = json.dumps({
+            "session_id": "sess-aca-2",
+            "prompt": "今日の天気はどうなりそうかな、外出の予定がある",
+            "cwd": "C:/anywhere",
+            "transcript_path": str(tmp_path / "missing.jsonl"),
+        })
+        assert run_user_prompt(stdin) == 0
+        out = capsys.readouterr().out
+        assert "連想想起" not in out
+
+
+class TestSkillAutonomyNudge:
+    def _state(self, settings):
+        _write_consolidation_state(settings, {
+            "skill_clusters": 3, "last_skill_nudged_at": 0.0,
+        })
+
+    def test_default_asks_for_approval(self, engram_home):
+        settings = get_settings()
+        self._state(settings)
+        text = _skill_nudge(settings, now=NOW)
+        assert text is not None
+        assert "承認" in text
+        assert "自動作成してよい" not in text
+
+    def test_autonomy_mode_instructs_auto_creation(self, engram_home):
+        (engram_home / "config.toml").write_text(
+            "skill_autonomy = true" + chr(10), encoding="utf-8"
+        )
+        settings = get_settings()
+        self._state(settings)
+        text = _skill_nudge(settings, now=NOW)
+        assert text is not None
+        assert "自動作成してよい" in text
+        assert "auto-" in text

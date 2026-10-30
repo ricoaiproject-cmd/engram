@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from dataclasses import asdict
@@ -41,6 +42,7 @@ class MemoryEngine:
         related_ids: list[str] | None = None,
         room: str | None = None,
         now: float | None = None,
+        valence: float = 0.0,
     ) -> dict:
         """保存。手順:
         1. content を埋め込み、vector_search(top1, 同 type, tier=hot)で重複検知。
@@ -59,6 +61,7 @@ class MemoryEngine:
         ts = now if now is not None else time.time()
         tags = list(tags) if tags else []
         room = room or "common"
+        valence = max(-1.0, min(1.0, float(valence or 0.0)))
 
         # correction タグがある場合 importance を引き上げる
         if "correction" in tags:
@@ -87,6 +90,7 @@ class MemoryEngine:
             source=source,
             links=related_ids or [],
             room=room,
+            valence=valence,
         )
 
         self.db.upsert_memory(
@@ -100,6 +104,7 @@ class MemoryEngine:
             content=content,
             embedding=vec,
             room=record.room,
+            valence=record.valence,
         )
 
         # 3. create イベントを初期符号化ブーストで記録
@@ -133,6 +138,7 @@ class MemoryEngine:
         room: str | None = None,   # None/"*"=全部屋。指定時は {room, common} に限定
         now: float | None = None,
         record_hits: bool = True,
+        modality: str | None = None,  # None=文章の記憶。"image"|"video"|"audio"|"document"|"media"=媒体の棚
     ) -> dict:
         """検索。fast の手順:
         1. tier=hot(episode は除外。type 指定があればそれを優先)で
@@ -173,6 +179,16 @@ class MemoryEngine:
         rooms: list[str] | None = None
         if room is not None and room != "*":
             rooms = sorted({room, "common"})
+
+        if modality:
+            # 媒体の棚(engram 0.24)。文章の記憶とは別の表・別の埋め込み空間なので
+            # 索引係(別 venv)に問い合わせる。tier は fast=hot / deep 以上=全部
+            from . import media as _media
+
+            kinds = None if modality in ("media", "any", "*") else [modality]
+            tiers = ["hot"] if mode == "fast" else None
+            return _media.find(self.settings, query, k=limit, kinds=kinds, rooms=rooms,
+                               tiers=tiers, record_hits=record_hits)
 
         if mode == "exhaustive":
             # 明示的な網羅検索: 活性度を無視し関連度のみで全件から拾う
@@ -617,6 +633,41 @@ class MemoryEngine:
         return hits
 
     # ----------------------------------------------------------------- reinforce
+    def read(self, ids: list[str], *, now: float | None = None,
+             record: bool = True) -> dict:
+        """id で本文を読む(縁の層から引くための入口。R8.10.11)。
+
+        自発的想起の「縁」は id と要旨1行しか持たないので、効きそうなものだけここで
+        本文を取る。読んだ事実は recall_hit として記録し(弱い強化)、縁からの引き上げ
+        回数が surface/fringe_reads.jsonl に残る(縁の効き目の物差し)。
+        """
+        ts = now if now is not None else time.time()
+        found: list[dict] = []
+        missing: list[str] = []
+        for i in ids:
+            row = self.db.get_memory(i)
+            if row is None:
+                missing.append(i)
+                continue
+            try:
+                rec = self.store.read(Path(row["path"]))
+                content = rec.content
+            except Exception:
+                content = ""
+            found.append({"id": i, "type": row["type"], "tier": row["tier"], "room": row.get("room", "common"),
+                          "importance": row["importance"] / 10, "content": content})
+            if record:
+                self.db.add_event(i, "recall_hit", self.settings.recall_hit_weight, ts)
+        if record and found:
+            try:
+                p = self.settings.data_dir / "surface" / "fringe_reads.jsonl"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with p.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"ts": ts, "ids": [h["id"] for h in found]}) + "\n")
+            except OSError:
+                pass
+        return {"memories": found, "missing": missing}
+
     def reinforce(self, ids: list[str], *, strength: float = 1.0,
                   now: float | None = None) -> dict:
         """使用報告。各 id に reinforce イベント
@@ -634,6 +685,7 @@ class MemoryEngine:
 
         reinforced: list[str] = []
         unknown: list[str] = []
+        repromoted: list[str] = []
         for id_ in ids:
             mem = self.db.get_memory(id_)
             if mem is None:
@@ -641,6 +693,18 @@ class MemoryEngine:
                 continue
             self.db.add_event(id_, "reinforce", weight, ts)
             reinforced.append(id_)
+            # 想起による復帰(再固定化): 沈黙(cold)していた記憶が実際に役立った
+            # なら hot へ戻す。人間の記憶も、沈んだものをシーンが来て思い出せば
+            # また手前に戻る——沈黙を一方通行にしない(「代謝する脳」R8.8.22)。
+            # superseded(訂正済み)は戻さない。
+            if mem.get("tier") == "cold":
+                self.db.set_tier(id_, "hot")
+                try:
+                    rec = self.store.read(Path(mem["path"]))
+                    self.store.set_tier(rec, "hot")
+                except Exception:
+                    pass
+                repromoted.append(id_)
 
         # ヘッブ則: 同時に reinforce された ペアに co_recall リンク
         for i in range(len(reinforced)):
@@ -658,6 +722,7 @@ class MemoryEngine:
 
         return {
             "reinforced": reinforced,
+            "repromoted": repromoted,
             "unknown_ids": unknown,
         }
 
@@ -720,6 +785,8 @@ class MemoryEngine:
             related_ids=[id],
             room=old_record.room,
             now=ts,
+            # 訂正は「避けろ」信号: 負の感情価で刻む(扁桃体の負情動優先と同型)
+            valence=-0.5,
         )
         new_id = new_result["id"]
 
@@ -747,6 +814,7 @@ class MemoryEngine:
         related_ids: list[str] | None = None,
         room: str = "common",
         now: float,
+        valence: float = 0.0,
     ) -> dict:
         """重複検知をスキップした記憶の直接保存(correct から呼ぶ)。"""
         s = self.settings
@@ -762,6 +830,7 @@ class MemoryEngine:
             source=source,
             links=related_ids or [],
             room=room,
+            valence=max(-1.0, min(1.0, float(valence or 0.0))),
         )
 
         self.db.upsert_memory(
@@ -775,6 +844,7 @@ class MemoryEngine:
             content=content,
             embedding=vec,
             room=record.room,
+            valence=record.valence,
         )
 
         create_weight = dynamics.create_event_weight(
@@ -1025,6 +1095,7 @@ class MemoryEngine:
                     content=record.content,
                     embedding=vec,
                     room=record.room,
+                    valence=record.valence,
                 )
                 # イベントが無い(=ゼロから再構築した)場合は create イベントを
                 # 再シードする。これが無いと再構築後の活性度が全件 0 になる
@@ -1053,6 +1124,7 @@ class MemoryEngine:
                     content=record.content,
                     embedding=vec,
                     room=record.room,
+                    valence=record.valence,
                 )
                 updated += 1
             else:
@@ -1098,11 +1170,42 @@ class MemoryEngine:
             # 速い経路: raw .md 件数が一致すれば同期済みとみなし、走査しない
             return {"action": "in_sync", "markdown": md_count, "index": idx_count}
 
+        # 2つ目の速い経路: 非記憶 .md(例 _hypotheses/run_log.md)や壊れた .md が
+        # あると raw 件数は恒常的にズレ、毎起動で下の全件走査に入る。記憶フォルダが
+        # Google Drive だと 4500 件の open に約118秒かかり、ENGRAM_PRELOAD=blocking
+        # の MCP ハンドシェイクが 120 秒で時間切れになった。
+        # 前回の全件走査で「無害」と確かめたズレ幅(md - valid)と今回のズレ幅
+        # (md - index)が同じなら、ローカルの remember は md と index を同数増やす
+        # だけなので同期済みとみなす。他マシンが記憶を書けばズレ幅が変わり、
+        # 従来どおり全件走査に入る。状態ファイルが無い・壊れている場合も従来どおり。
+        state_path = Path(self.settings.data_dir) / "startup_index_state.json"
+        try:
+            benign = json.loads(
+                state_path.read_text(encoding="utf-8")
+            ).get("benign_offset")
+        except Exception:
+            benign = None
+        if isinstance(benign, int) and md_count - idx_count == benign:
+            return {
+                "action": "in_sync",
+                "markdown": md_count,
+                "index": idx_count,
+                "note": f"既知の無害なズレ({benign}件)と一致したため全件走査を省略",
+            }
+
         # 件数が違う。空ファイル・壊れた frontmatter・id 無しの非記憶 .md による
         # 見かけ上のズレかもしれない(scan_all はそれらをスキップする)。無駄な
         # reindex を避けるため、index と同じ「有効な記憶」母集団で正確に数え直す。
         valid_count = sum(1 for _ in self.store.scan_all())
         if valid_count == idx_count:
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.write_text(
+                    json.dumps({"benign_offset": md_count - valid_count}),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass  # 記録は最善努力(次回また全件走査になるだけ)
             return {
                 "action": "in_sync",
                 "markdown": md_count,

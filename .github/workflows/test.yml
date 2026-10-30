@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main]
+    branches: [main, portability]
   pull_request:
 
 jobs:
@@ -36,3 +36,56 @@ jobs:
         run: |
           if [ -f .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
           "$PY" -m pytest -q
+
+  # A stranger's machine: fresh runner, empty ENGRAM_HOME, no Ollama, no agent CLIs.
+  # Verifies that the metabolism layer (night / dmn / rsi) runs — and degrades
+  # quietly — with no user-specific path baked into the package.
+  clean-install:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install from the checkout as a user would
+        shell: bash
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        run: |
+          uv venv --python 3.12
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          fi
+          uv pip install .
+
+      - name: Run the metabolism layer in an empty home
+        shell: bash
+        env:
+          ENGRAM_HOME: ${{ runner.temp }}/engram-home
+          ENGRAM_DISABLE_DAEMON: "1"
+        run: |
+          set -ex
+          if [ -f .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
+          cd "$RUNNER_TEMP"   # leave the checkout so the installed package is what runs
+          "$PY" -m engram --fake-embedder remember "clean-room smoke memory about openpyxl formulas" --type knowledge --importance 5
+          "$PY" -m engram --fake-embedder recall "openpyxl" --no-record
+          "$PY" -m engram --fake-embedder night --dry-run
+          rc=0; "$PY" -m engram --fake-embedder dmn --force --dry-run || rc=$?; test "$rc" = 0 -o "$rc" = 2
+          "$PY" -m engram rsi
+          "$PY" -m engram metabolism
+          test -f "$ENGRAM_HOME/sleep_agents.txt"
+          test -f "$ENGRAM_HOME/sleep_prompt.md"
+
+      - name: No user-specific paths in the published tree
+        shell: bash
+        run: |
+          # 実在の利用者名は書かない(この検査の行自体が公開される)。例に使う名前だけ許す
+          files="src/ tests/ docs/ scripts/ README.md install.ps1 install.sh"
+          users=$(grep -rnoE --exclude-dir=__pycache__ '[Uu]sers[/\\]+[A-Za-z0-9._-]+' $files 2>/dev/null \
+                  | grep -viE '[Uu]sers[/\\]+(you|me|username|runner|example)$' || true)
+          drives=$(grep -rnE --exclude-dir=__pycache__ '[A-Z]:[/\\]+(マイドライブ|My Drive)' $files 2>/dev/null || true)
+          if [ -n "$users$drives" ]; then printf '%s\n%s\n' "$users" "$drives"; exit 1; fi

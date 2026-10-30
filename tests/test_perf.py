@@ -126,8 +126,13 @@ def test_timed_noop_when_perf_log_disabled(tmp_path):
 # ---------------------------------------------------------------------------
 
 _EXPECTED_TOOLS = {
+    "hypothesis_seeds",
+    "hypothesize",
+    "hypotheses",
+    "resolve_hypothesis",
     "remember",
     "recall",
+    "read",
     "reinforce",
     "correct",
     "link",
@@ -137,6 +142,9 @@ _EXPECTED_TOOLS = {
     "skill_candidates",
     "reindex",
     "stats",
+    # 媒体の棚(0.24)
+    "remember_file",
+    "media_status",
 }
 
 

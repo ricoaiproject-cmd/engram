@@ -52,6 +52,7 @@ def extract_messages(transcript_path: str | Path) -> dict:
     壊れた行・未知の形式は黙ってスキップする(フックを落とさない)。
     """
     user_texts: list[str] = []
+    assistant_texts: list[str] = []   # 直近のアシスタント発言(最大3件)
     last_assistant = ""
     summary = ""
     cwd = ""
@@ -93,9 +94,13 @@ def extract_messages(transcript_path: str | Path) -> dict:
                 for t in _texts_from_content(message.get("content")):
                     if t.strip():
                         last_assistant = t.strip()
+                        assistant_texts.append(last_assistant)
+                        if len(assistant_texts) > 3:
+                            assistant_texts.pop(0)
 
     return {
         "user_texts": user_texts,
+        "assistant_texts": assistant_texts,
         "last_assistant": last_assistant,
         "summary": summary,
         "cwd": cwd,
@@ -156,3 +161,88 @@ def build_episode(
         lines.append(f"結末(最後の応答の要旨): {_clip(last_assistant, 280)}")
 
     return "\n".join(lines)
+
+# 感情価の推定に使う語(決定的ヒューリスティック。LLM 不使用)
+_NEGATIVE_MARKERS = (
+    "訂正", "間違", "違う", "ダメ", "だめ", "やり直", "事故", "失敗",
+    "エラー", "おかしい", "忘れすぎ", "できていない", "止まって",
+)
+_POSITIVE_MARKERS = (
+    "ありがとう", "助かる", "助かった", "いいね", "完璧", "素晴らし",
+    "成功", "合格", "その通り", "まさにそれ",
+)
+
+
+def estimate_valence(user_texts: list[str]) -> float:
+    """ユーザー発言から episode の感情価(-0.8..0.8)を推定する。
+
+    人間の符号化優先度は感情が自動でつける(扁桃体)。その最小版として、
+    訂正・失敗の語(負)と称賛・成功の語(正)の出現数で符号化する。
+    粗い代理指標であり、精密な感情価はエージェントが remember 時に付ける。
+    """
+    text = " ".join(user_texts)
+    neg = sum(text.count(m) for m in _NEGATIVE_MARKERS)
+    pos = sum(text.count(m) for m in _POSITIVE_MARKERS)
+    return max(-0.8, min(0.8, 0.2 * pos - 0.25 * neg))
+
+
+def build_episodes(
+    messages: dict,
+    *,
+    date_str: str,
+    project: str = "",
+    min_chars: int = 24,
+    max_user_items: int = 6,
+    segment_user_turns: int = 0,
+) -> list[str]:
+    """セッションを episode 本文のリストに組み立てる(粒度の設定つき)。
+
+    segment_user_turns > 0 かつユーザー発言がそれを超える長いセッションは、
+    発言をその件数ごとに区切って複数の episode にする(パート i/n を明記)。
+    1セッション1要約では長丁場の中盤が捨てられるため(「代謝する脳」Phase 3)。
+    それ以外は従来どおり build_episode 1件。
+    """
+    user_texts: list[str] = messages.get("user_texts", [])
+    if not user_texts:
+        return []
+    if sum(len(t) for t in user_texts) < min_chars:
+        return []
+
+    n_seg = segment_user_turns
+    if n_seg <= 0 or len(user_texts) <= n_seg:
+        ep = build_episode(
+            messages,
+            date_str=date_str,
+            project=project,
+            min_chars=min_chars,
+            max_user_items=max_user_items,
+        )
+        return [ep] if ep else []
+
+    title = messages.get("summary") or _clip(user_texts[0], 60)
+    chunks = [
+        user_texts[i:i + n_seg] for i in range(0, len(user_texts), n_seg)
+    ]
+    total = len(chunks)
+    episodes: list[str] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        part_messages = {
+            "user_texts": chunk,
+            "summary": f"{_clip(title, 60)} (パート{idx}/{total})",
+            # 結末はセッション最後のパートにだけ書く
+            "last_assistant": (
+                messages.get("last_assistant", "") if idx == total else ""
+            ),
+        }
+        ep = build_episode(
+            part_messages,
+            date_str=date_str,
+            project=project,
+            min_chars=0,
+            # パート内は全発言を残す(粒度向上の本体)
+            max_user_items=n_seg,
+        )
+        if ep:
+            episodes.append(ep)
+    return episodes
+

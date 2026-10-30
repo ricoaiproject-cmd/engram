@@ -236,6 +236,106 @@ class OnnxRuriEmbedder:
         return self._encode([self._doc_prefix + t for t in texts])
 
 
+class DaemonEmbedder:
+    """窓口用: 埋め込みの計算を共有デーモンに頼み、モデルを自分で持たない。
+
+    背景(R8.10.23 実測): stdio MCP はセッションごとに1プロセス立ち、記憶を
+    引いたプロセスがそれぞれ約800MBのモデルを抱えていた(同時に3つ)。
+    モデルはデーモン1つに集め、各 MCP はここを通して数値だけを受け取る。
+
+    デーモンが不在なら起動を仕掛けて少し待ち、それでも届かない・旧版で
+    埋め込みに未対応・応答が壊れている場合は、手元の実行系(local)で
+    計算する(従来どおり)。記憶機能は止めない。手元で計算したときの
+    モデルはアイドル解放の対象(loaded / unload は local へ委譲)。
+    """
+
+    def __init__(self, settings, local, *, spawn_wait: float = 15.0,
+                 retry_after: float = 60.0, request_timeout: float = 60.0
+                 ) -> None:
+        self._settings = settings
+        self._local = local
+        self._spawn_wait = spawn_wait
+        self._retry_after = retry_after
+        self._timeout = request_timeout
+        # この時刻まではデーモンを試さず手元で計算する(不通の連打を防ぐ)
+        self._skip_until = 0.0
+        self.remote_calls = 0
+        self.local_calls = 0
+
+    # --- 手元の実行系へ委譲するもの(meta.json から読むのでロードは走らない)
+    @property
+    def dim(self) -> int:
+        return int(self._local.dim)
+
+    @property
+    def loaded(self) -> bool:
+        return bool(getattr(self._local, "loaded", False))
+
+    def unload(self) -> bool:
+        fn = getattr(self._local, "unload", None)
+        return bool(fn()) if fn is not None else False
+
+    # --- 埋め込み
+    def embed_query(self, text: str) -> np.ndarray:
+        vecs = self._remote("query", [text])
+        if vecs is None:
+            self.local_calls += 1
+            return self._local.embed_query(text)
+        return vecs[0]
+
+    def embed_docs(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        vecs = self._remote("docs", list(texts))
+        if vecs is None:
+            self.local_calls += 1
+            return self._local.embed_docs(texts)
+        return vecs
+
+    def _remote(self, kind: str, texts: list[str]) -> np.ndarray | None:
+        import sys
+        import time
+
+        from . import daemon
+
+        now = time.monotonic()
+        if now < self._skip_until:
+            return None
+        raw = daemon.embed(self._settings, kind, texts, timeout=self._timeout)
+        if raw is None:
+            caps = daemon.capabilities(self._settings)
+            if caps is not None and "embed" not in caps:
+                # 旧版のデーモンが常駐している。入れ替わるまで手元で計算する
+                self._skip_until = now + 10 * self._retry_after
+                print("engram: daemon is an older version without embed; "
+                      "embedding locally", file=sys.stderr)
+                return None
+            if caps is None:
+                daemon.ensure_running(self._settings)
+                deadline = time.monotonic() + self._spawn_wait
+                while time.monotonic() < deadline:
+                    caps = daemon.capabilities(self._settings)
+                    if caps is not None:
+                        break
+                    time.sleep(0.25)
+            if caps is not None and "embed" in caps:
+                raw = daemon.embed(self._settings, kind, texts,
+                                   timeout=self._timeout)
+        if raw is None:
+            self._skip_until = time.monotonic() + self._retry_after
+            print("engram: daemon unavailable; embedding locally",
+                  file=sys.stderr)
+            return None
+        vecs = np.asarray(raw, dtype=np.float32)
+        if vecs.ndim != 2 or vecs.shape != (len(texts), self.dim):
+            self._skip_until = time.monotonic() + self._retry_after
+            print(f"engram: daemon returned shape {vecs.shape}; "
+                  "embedding locally", file=sys.stderr)
+            return None
+        self.remote_calls += 1
+        return vecs
+
+
 def make_embedder(settings) -> Embedder:
     """settings.embed_backend に従って実行系を選ぶ(build_engine から使う)。
 

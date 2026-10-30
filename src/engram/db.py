@@ -106,7 +106,8 @@ class IndexDB:
                     created_at REAL,
                     importance INTEGER,
                     tier TEXT,
-                    room TEXT DEFAULT 'common'
+                    room TEXT DEFAULT 'common',
+                    valence REAL DEFAULT 0
                 )"""
             )
             # 旧スキーマ(v0.2 以前)からのマイグレーション: room 列が無ければ追加
@@ -117,6 +118,11 @@ class IndexDB:
             if "room" not in cols:
                 self._conn.execute(
                     "ALTER TABLE memories ADD COLUMN room TEXT DEFAULT 'common'"
+                )
+            # v0.15 マイグレーション: 感情価
+            if "valence" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE memories ADD COLUMN valence REAL DEFAULT 0"
                 )
 
             # vec0 virtual table
@@ -175,6 +181,7 @@ class IndexDB:
         content: str,
         embedding: np.ndarray,
         room: str = "common",
+        valence: float = 0.0,
     ) -> None:
         """memories / vec_memories / fts_memories を一括 upsert(同一トランザクション)。"""
         emb = np.asarray(embedding, dtype=np.float32)
@@ -184,8 +191,8 @@ class IndexDB:
             # memories: upsert
             self._conn.execute(
                 """INSERT INTO memories(id, path, type, content_hash,
-                    created_at, importance, tier, room)
-                   VALUES (?,?,?,?,?,?,?,?)
+                    created_at, importance, tier, room, valence)
+                   VALUES (?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                        path=excluded.path,
                        type=excluded.type,
@@ -193,9 +200,10 @@ class IndexDB:
                        created_at=excluded.created_at,
                        importance=excluded.importance,
                        tier=excluded.tier,
-                       room=excluded.room""",
+                       room=excluded.room,
+                       valence=excluded.valence""",
                 (id, path, type, content_hash, created_at, importance, tier,
-                 room),
+                 room, valence),
             )
 
             # vec_memories: vec0 doesn't support UPSERT reliably → DELETE+INSERT
