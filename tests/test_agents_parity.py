@@ -145,3 +145,26 @@ def test_task_xml_escapes_and_runs_missed_jobs():
     xml = scheduler.task_xml(["C:/a b/pythonw.exe", "-m", "engram", "night", "--home", "C:/x&y"],
                              daily_at="02:30", every_minutes=None)
     assert "<StartWhenAvailable>true</StartWhenAvailable>" in xml and "C:/x&amp;y" in xml
+
+
+def test_codex_transcript_is_read_like_claude(tmp_path):
+    """Codex の会話記録(response_item/payload)も、会話の終わりの自動記録の材料として読める。"""
+    from engram.transcript import extract_messages
+
+    rows = [
+        {"type": "session_meta", "payload": {"cwd": "C:/work/proj"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "developer",
+                                              "content": [{"type": "input_text", "text": "system"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                              "content": [{"type": "input_text", "text": "# AGENTS.md instructions for x"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                              "content": [{"type": "input_text", "text": "ログの集計を直して"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                              "content": [{"type": "output_text", "text": "集計を直しました"}]}},
+        {"type": "event_msg", "payload": {"type": "token_count"}},
+    ]
+    p = tmp_path / "rollout.jsonl"
+    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    m = extract_messages(p)
+    assert m["user_texts"] == ["ログの集計を直して"]
+    assert m["last_assistant"] == "集計を直しました" and m["cwd"] == "C:/work/proj"

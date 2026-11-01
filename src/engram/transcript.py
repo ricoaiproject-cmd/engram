@@ -16,6 +16,7 @@ _NOISE_PREFIXES = (
     "<",            # <command-name> / <system-reminder> / <local-command-stdout> 等
     "Caveat:",      # ローカルコマンド実行時の注意書き
     "[Request interrupted",
+    "# AGENTS.md instructions",  # Codex が利用者の発言として差し込む指示ファイル
 )
 
 
@@ -81,6 +82,20 @@ def extract_messages(transcript_path: str | Path) -> dict:
                 continue
             if obj.get("isMeta"):
                 continue
+
+            # Codex の記録: {"type": "response_item", "payload": {"type": "message", "role": ...,
+            # "content": [{"type": "input_text" | "output_text", "text": ...}]}}。作業ディレクトリは
+            # session_meta / turn_context の payload.cwd にある。Claude Code と同じ形に読み替える
+            payload = obj.get("payload")
+            if isinstance(payload, dict):
+                if not cwd and isinstance(payload.get("cwd"), str):
+                    cwd = payload["cwd"]
+                if kind == "response_item" and payload.get("type") == "message":
+                    blocks = [{"type": "text", "text": b.get("text")}
+                              for b in payload.get("content") or []
+                              if isinstance(b, dict) and b.get("type") in ("input_text", "output_text")]
+                    kind = {"user": "user", "assistant": "assistant"}.get(payload.get("role"))
+                    obj = {"message": {"role": kind, "content": blocks}}
 
             message = obj.get("message")
             if not isinstance(message, dict):
