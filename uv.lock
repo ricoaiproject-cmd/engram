@@ -424,7 +424,7 @@ wheels = [
 
 [[package]]
 name = "engram"
-version = "0.25.4"
+version = "0.25.5"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -463,7 +463,7 @@ requires-dist = [
     { name = "google-api-python-client", marker = "extra == 'mail'", specifier = ">=2.100" },
     { name = "google-auth-oauthlib", marker = "extra == 'mail'", specifier = ">=1.2" },
     { name = "librosa", marker = "extra == 'media'", specifier = ">=0.10" },
-    { name = "mcp", specifier = ">=1.2,<2" },
+    { name = "mcp", specifier = ">=1.9,<2" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "onnx", specifier = ">=1.16" },
     { name = "onnxruntime", specifier = ">=1.20" },

@@ -79,6 +79,16 @@ def ensure_night_files(settings: Settings) -> tuple[Path, Path]:
     return agents, prompt
 
 
+def resolve_skills_dir(settings: Settings) -> Path:
+    """自動で作るスキルの置き場。設定が無ければ、手元のエージェントの置き場を使う。"""
+    if settings.skills_dir:
+        return Path(settings.skills_dir).expanduser()
+    for agent_dir in (Path.home() / ".claude", Path.home() / ".codex"):
+        if agent_dir.is_dir():
+            return agent_dir / "skills"
+    return settings.data_dir / "skills"
+
+
 # 従量課金の API キーが環境にあると、その CLI は利用枠(定額)ではなく鍵で課金されうる。
 # 毎晩黙って料金がかかるのを避けるため、既定では使わない(night_agents_allow_api_key で許可)
 API_KEY_ENVS = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
@@ -259,7 +269,7 @@ def skill_pass_local(engine, settings: Settings, llm: LocalLLM, *,
     except Exception:
         proposed = set()
     created = proposals = 0
-    skills_dir = Path(settings.skills_dir).expanduser()
+    skills_dir = resolve_skills_dir(settings)
     for cluster in (engine.skill_candidates().get("clusters") or [])[:max_clusters]:
         ids = cluster.get("ids") or []
         key = hashlib.md5(",".join(sorted(ids)).encode()).hexdigest()[:12]
@@ -309,7 +319,7 @@ def skill_pass_local(engine, settings: Settings, llm: LocalLLM, *,
 def retire_unused_auto_skills(settings: Settings) -> int:
     """作成後 N 日たっても記憶(会話の自動符号化を含む)に名前が現れない auto スキルを
     _retired/ へ移す(削除はしない)。使われないものは代謝が引退させる。"""
-    skills_dir = Path(settings.skills_dir).expanduser()
+    skills_dir = resolve_skills_dir(settings)
     if not skills_dir.is_dir() or not settings.db_path.is_file():
         return 0
     retired, now = 0, time.time()

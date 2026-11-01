@@ -30,7 +30,52 @@ from . import perf
 from .config import resolve_room
 from .engine import MemoryEngine, build_engine
 
-mcp = FastMCP("engram")
+# 初期化の応答で渡す案内。Claude Code・Codex・Gemini CLI はこれをモデルに渡すので、
+# フックや指示ファイルが無い環境でも記憶の使い方が届く
+_INSTRUCTIONS = (
+    "engram は人間型の永続記憶です。作業に着手する前に、その主題で recall を呼んで過去の知見・"
+    "利用者の流儀・経緯を確かめてください。苦労して解決した原因と解法、重要な判断とその理由、"
+    "利用者の好みや訂正は、その場で remember してください(1記憶=1事実)。recall した記憶のうち"
+    "実際に役立ったものは reinforce し、誤っていた記憶は forget ではなく correct で直してください。"
+    "recall の応答に notice があれば、それは記憶の保守(整理・スキル化)の促しなので、作業の区切りで対応してください。"
+    "パスワード・API キー・個人情報は記憶しないでください。"
+)
+
+mcp = FastMCP("engram", instructions=_INSTRUCTIONS)
+
+# 記憶整理・スキル化の促しは、フックの無い環境(Codex・Gemini でフック未承認の人、
+# Antigravity など)にも届くよう、プロセスの最初の recall の応答にも添える
+_nudge_checked = False
+_nudge_lock = threading.Lock()
+
+
+def _mcp_nudges(engine: "MemoryEngine") -> list[str]:
+    """このプロセスで1回だけ、時期の来た促しを返す(間隔の管理はフックと共通の状態ファイル)。"""
+    global _nudge_checked
+    with _nudge_lock:
+        if _nudge_checked:
+            return []
+        _nudge_checked = True
+    import time as _time
+
+    from .hooks import (_consolidation_nudge, _read_consolidation_state, _skill_nudge,
+                        _write_consolidation_state)
+
+    settings = engine.settings
+    try:
+        state = _read_consolidation_state(settings)
+        # 候補数の棚卸しは本来セッション終了のフックが行う。フックが無い環境のため、
+        # 1日以上古ければここで数え直す
+        if _time.time() - float(state.get("checked_at", 0) or 0) > 86400:
+            upd: dict = {"checked_at": _time.time()}
+            if settings.consolidate_nudge:
+                upd["clusters"] = len(engine.consolidation_candidates().get("clusters", []))
+            if settings.skill_nudge:
+                upd["skill_clusters"] = len(engine.skill_candidates().get("clusters", []))
+            _write_consolidation_state(settings, upd)
+        return [n for n in (_consolidation_nudge(settings), _skill_nudge(settings)) if n]
+    except Exception:
+        return []
 
 # モジュールレベル遅延シングルトン(初回ツール呼び出しで構築)
 _engine: MemoryEngine | None = None
@@ -285,7 +330,7 @@ def recall(
     """
     engine = _get_engine()
     with _timed("recall"):
-        return engine.recall(
+        result = engine.recall(
             query=query,
             mode=mode,
             limit=limit,
@@ -294,6 +339,11 @@ def recall(
             modality=modality,
             room=room if room is not None else _default_room(),
         )
+    if record_hits and isinstance(result, dict):
+        notes = _mcp_nudges(engine)
+        if notes:
+            result["notice"] = "\n\n".join(notes)
+    return result
 
 
 @mcp.tool()

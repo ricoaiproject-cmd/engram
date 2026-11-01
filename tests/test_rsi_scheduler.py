@@ -53,8 +53,12 @@ def test_schedule_spec_builds_commands_without_running():
     assert "-m" in " ".join(scheduler.command_for("night")) and "engram" in " ".join(scheduler.command_for("dmn"))
     if os.name == "nt":
         assert night["install"][:4] == ["schtasks", "/Create", "/TN", "EngramSleepNight"]
-        assert "03:15" in night["install"] and "/MO" in dmn["install"] and "10" in dmn["install"]
+        assert "T03:15:00" in night["xml"] and "<Interval>PT10M</Interval>" in dmn["xml"]
+        # PC が眠っていた夜の分を、起きたあとで実行する(R8.11.1 指摘)
+        assert "<StartWhenAvailable>true</StartWhenAvailable>" in night["xml"]
         assert night["uninstall"][-2:] == ["EngramSleepNight", "/F"]
+        hyp = scheduler.schedule_spec("hyp")
+        assert hyp["install"][3] == "EngramHypothesis" and "hyp-run" in hyp["xml"]
     else:
         assert night["cron_line"].startswith("15 3 * * *") and night["cron_line"].endswith("# engram:night")
         assert dmn["cron_line"].startswith("*/10 * * * *")

@@ -148,13 +148,25 @@ class TestAgentsMd:
     def test_idempotent_if_engram_present(self, tmp_path):
         agents_md = tmp_path / ".codex" / "AGENTS.md"
         agents_md.parent.mkdir(parents=True, exist_ok=True)
-        agents_md.write_text("# engram 記憶プロトコル\n既存の内容。\n", encoding="utf-8")
+        agents_md.write_text("# 記憶プロトコル(engram)\n既存の内容。\n", encoding="utf-8")
         protocol = tmp_path / "MEMORY_PROTOCOL.md"
         protocol.write_text("# プロトコル", encoding="utf-8")
 
         ok, msg = update_agents_md(agents_md, protocol)
         assert ok
         assert "スキップ" in msg
+
+    def test_mentioning_engram_is_not_the_protocol(self, tmp_path):
+        """engram に触れたメモがあるだけでは、プロトコルが入っているとみなさない(R8.11.1 指摘)。"""
+        agents_md = tmp_path / ".codex" / "AGENTS.md"
+        agents_md.parent.mkdir(parents=True, exist_ok=True)
+        agents_md.write_text("engram の README を読んでおくこと。\n", encoding="utf-8")
+        protocol = tmp_path / "MEMORY_PROTOCOL.md"
+        protocol.write_text("# 記憶プロトコル(engram)\n本文", encoding="utf-8")
+
+        ok, msg = update_agents_md(agents_md, protocol)
+        assert ok and "追記完了" in msg
+        assert "記憶プロトコル(engram)" in agents_md.read_text(encoding="utf-8")
 
     def test_creates_file_if_not_exists(self, tmp_path):
         agents_md = tmp_path / ".codex" / "AGENTS.md"

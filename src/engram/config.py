@@ -283,7 +283,8 @@ class Settings:
     distill_window_hours: float = 48.0      # 蒸留の材料にする episode の新しさ
     distill_max_episodes: int = 10          # 1晩に蒸留する episode 数の上限
     # スキル自律作成の置き場と、使われない auto スキルの引退日数
-    skills_dir: str = "~/.claude/skills"
+    # None なら手元のエージェントの置き場(~/.claude/skills → ~/.codex/skills)、どちらも無ければ data_dir/skills
+    skills_dir: str | None = None
     auto_skill_retire_days: int = 30
 
     # --- 自動実行(OS スケジューラ)---
@@ -313,6 +314,9 @@ class Settings:
 
     # --- 仮説サイクル(engram 0.25。hypothesis.py)---
     # 仮説を立てて確かめるのはモデル(ルーティン)、engram は仮説・判定・元の記憶を結んで持つ
+    # 仮説サイクルを毎日回す CLI。""=まだ聞いていない / "none"=回さない / "claude" / "codex"。
+    # Web で調べものをし、記憶の一部を外へ送り、利用枠を使うので、本人が選んだときだけ回す
+    hyp_agent: str = ""
     hyp_default_due_days: int = 3           # 期限の既定(書いた日+N日。同日判定は禁止)
     hyp_importance: int = 4                 # 仮説(episode)の importance
     hyp_result_importance: int = 6          # 当たりから作る knowledge の importance

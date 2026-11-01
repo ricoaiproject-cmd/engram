@@ -16,8 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-TASK_NAMES = {"night": "EngramSleepNight", "dmn": "EngramDMN"}
-MARKERS = {"night": "# engram:night", "dmn": "# engram:dmn"}
+TASK_NAMES = {"night": "EngramSleepNight", "dmn": "EngramDMN", "hyp": "EngramHypothesis"}
+MARKERS = {"night": "# engram:night", "dmn": "# engram:dmn", "hyp": "# engram:hyp"}
 
 
 def task_name(kind: str, suffix: str = "") -> str:
@@ -40,7 +40,7 @@ def _python_for_background() -> str:
 
 def command_for(kind: str, home: Path | str | None = None) -> list[str]:
     """スケジューラに登録する実行コマンド(配列)。"""
-    sub = {"night": ["night"], "dmn": ["dmn"]}[kind]
+    sub = {"night": ["night"], "dmn": ["dmn"], "hyp": ["hyp-run"]}[kind]
     cmd = [_python_for_background(), "-m", "engram", *sub]
     if home is not None:
         cmd += ["--home", str(home)]
@@ -51,26 +51,59 @@ def _quote_win(parts: list[str]) -> str:
     return " ".join(f'"{p}"' if " " in p else p for p in parts)
 
 
+def task_xml(cmd: list[str], *, daily_at: str | None, every_minutes: int | None) -> str:
+    """タスクスケジューラに渡す定義(XML)。
+
+    schtasks の /SC 指定では「逃した回を後で実行する(StartWhenAvailable)」を付けられず、
+    PC が眠っていた夜の整理が丸ごと飛んでいた。XML で渡して付ける。電池でも動かし、
+    重なったら新しいほうを捨てる。
+    """
+    from xml.sax.saxutils import escape
+
+    exe, args = cmd[0], _quote_win(cmd[1:])
+    if daily_at:
+        trigger = (f"<CalendarTrigger><StartBoundary>2026-01-01T{daily_at}:00</StartBoundary>"
+                   "<Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval>"
+                   "</ScheduleByDay></CalendarTrigger>")
+    else:
+        trigger = ("<TimeTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled>"
+                   f"<Repetition><Interval>PT{every_minutes}M</Interval><StopAtDurationEnd>false"
+                   "</StopAtDurationEnd></Repetition></TimeTrigger>")
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        f"<Triggers>{trigger}</Triggers>"
+        "<Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType>"
+        "<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>"
+        "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+        "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+        "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+        "<StartWhenAvailable>true</StartWhenAvailable>"
+        "<ExecutionTimeLimit>PT3H</ExecutionTimeLimit><Enabled>true</Enabled></Settings>"
+        f"<Actions Context=\"Author\"><Exec><Command>{escape(exe)}</Command>"
+        f"<Arguments>{escape(args)}</Arguments></Exec></Actions></Task>"
+    )
+
+
 def schedule_spec(kind: str, *, night_time: str = "02:30",
-                  dmn_minutes: int = 15, home: Path | str | None = None,
-                  suffix: str = "") -> dict:
+                  dmn_minutes: int = 15, hyp_time: str = "07:30",
+                  home: Path | str | None = None, suffix: str = "") -> dict:
     """OS 別の登録内容を組み立てて返す(実行はしない)。テストで検証できる形。"""
     cmd = command_for(kind, home)
     name = task_name(kind, suffix)
+    daily = {"night": night_time, "hyp": hyp_time}.get(kind)
     if os.name == "nt":
-        tr = _quote_win(cmd)
-        if kind == "night":
-            args = ["schtasks", "/Create", "/TN", name, "/TR", tr,
-                    "/SC", "DAILY", "/ST", night_time, "/F"]
-        else:
-            args = ["schtasks", "/Create", "/TN", name, "/TR", tr,
-                    "/SC", "MINUTE", "/MO", str(dmn_minutes), "/F"]
-        return {"os": "windows", "install": args,
+        xml = task_xml(cmd, daily_at=daily, every_minutes=None if daily else dmn_minutes)
+        args = ["schtasks", "/Create", "/TN", name, "/XML", "<定義ファイル>", "/F"]
+        return {"os": "windows", "install": args, "xml": xml,
                 "uninstall": ["schtasks", "/Delete", "/TN", name, "/F"],
                 "query": ["schtasks", "/Query", "/TN", name],
-                "display": " ".join(args)}
-    hh, mm = night_time.split(":")
-    sched = f"{int(mm)} {int(hh)} * * *" if kind == "night" else f"*/{dmn_minutes} * * * *"
+                "display": f"タスクスケジューラ: {name} ← {_quote_win(cmd)}"}
+    if daily:
+        hh, mm = daily.split(":")
+        sched = f"{int(mm)} {int(hh)} * * *"
+    else:
+        sched = f"*/{dmn_minutes} * * * *"
     line = f"{sched} {' '.join(cmd)} >/dev/null 2>&1 {marker(kind, suffix)}"
     return {"os": "unix", "cron_line": line, "marker": marker(kind, suffix),
             "display": f"crontab: {line}"}
@@ -129,10 +162,18 @@ def install(kind: str, *, force: bool = False, **kw) -> tuple[bool, str]:
                        "ないため上書きしません(置き換えるなら --force-schedule)")
     spec = schedule_spec(kind, **kw)
     if spec["os"] == "windows":
+        import tempfile
+
+        fd, xml_path = tempfile.mkstemp(suffix=".xml", prefix="engram_task_")
+        os.close(fd)
         try:
-            r = subprocess.run(spec["install"], capture_output=True, text=True)
+            Path(xml_path).write_text(spec["xml"], encoding="utf-16")
+            args = [xml_path if a == "<定義ファイル>" else a for a in spec["install"]]
+            r = subprocess.run(args, capture_output=True, text=True)
         except OSError as exc:
             return False, f"schtasks を実行できません: {exc}"
+        finally:
+            Path(xml_path).unlink(missing_ok=True)
         ok = r.returncode == 0
         return ok, (r.stdout or r.stderr or "").strip() or spec["display"]
     current = _crontab_read()

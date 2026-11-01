@@ -21,14 +21,16 @@ class FakeScheduler:
         return True, "ok"
 
 
-def _no_llm(monkeypatch):
-    monkeypatch.setattr(setup_mod.LocalLLMProbe, "available", staticmethod(lambda s: False))
+def _no_llm(monkeypatch, llm: bool = True):
+    """claude / codex は見つからない扱い。llm=True はローカル LLM がある扱い(DMN を登録する)。"""
+    monkeypatch.setattr(setup_mod.LocalLLMProbe, "available", staticmethod(lambda s: llm))
+    monkeypatch.setattr(setup_mod.shutil, "which", lambda name: None)
     monkeypatch.setattr(night_mod, "available_agents", lambda s: [("claude -p", "claude (見つからない)")])
 
 
 def test_spec_carries_home_and_suffix(tmp_path):
     spec = scheduler.schedule_spec("night", home=tmp_path / "h", suffix="_Test")
-    joined = " ".join(spec.get("install", [spec.get("cron_line", "")]))
+    joined = spec.get("xml") or spec.get("cron_line", "")
     assert "--home" in joined and str(tmp_path / "h") in joined
     if os.name == "nt":
         assert spec["install"][3] == "EngramSleepNight_Test"
@@ -58,7 +60,16 @@ def test_schedule_step_registers_both_by_default(tmp_path, monkeypatch):
     assert all(c[1]["home"] == tmp_path for c in fake.calls)
     # 止めてある・使えない機能は画面に出す(黙ってオフにしない)
     assert any("媒体の棚" in n and "engram media setup" in n for n in notices)
-    assert any("Ollama" in n for n in notices)
+    assert not any("DMN" in n for n in notices)
+
+
+def test_dmn_is_not_registered_without_local_llm(tmp_path, monkeypatch):
+    """DMN の考える係はローカル LLM だけ。無い PC では登録せず、入れれば動くと知らせる。"""
+    _no_llm(monkeypatch, llm=False)
+    fake = FakeScheduler()
+    notices = setup_mod.schedule_step(tmp_path / "c.toml", tmp_path, schedule=True, results=[], scheduler_mod=fake)
+    assert [c[0] for c in fake.calls] == ["night"]
+    assert any("DMN" in n and "engram dmn --install" in n and "Ollama" in n for n in notices)
 
 
 def test_schedule_step_respects_users_stop(tmp_path, monkeypatch):

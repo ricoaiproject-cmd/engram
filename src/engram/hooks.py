@@ -593,7 +593,7 @@ def run_session_end(stdin_text: str | None = None) -> int:
 # ② 自発的想起(UserPromptSubmit)
 # ---------------------------------------------------------------------------
 
-def run_user_prompt(stdin_text: str | None = None) -> int:
+def run_user_prompt(stdin_text: str | None = None, event_name: str = "UserPromptSubmit") -> int:
     """UserPromptSubmit フック本体。常に 0 を返す(プロンプトを妨げない)。
 
     active モードでは hookSpecificOutput.additionalContext として浮上記憶を
@@ -695,7 +695,8 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
         if context_parts:
             payload = {
                 "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
+                    # Claude Code / Codex は UserPromptSubmit、Gemini CLI は BeforeAgent
+                    "hookEventName": event_name,
                     "additionalContext": "\n\n".join(context_parts),
                 }
             }

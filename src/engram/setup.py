@@ -237,15 +237,70 @@ def _is_engram_hook_cmd(command: str) -> bool:
     return "engram" in command and " hook " in f"{command} "
 
 
+#: Codex に登録するフック(~/.codex/hooks.json。書き方と入出力は Claude Code と同じ形。秒)
+_CODEX_HOOK_EVENTS: list[tuple[str, str, int]] = [
+    ("SessionEnd", "session-end", 180),       # Codex の SessionEnd は既定1秒なので明示する
+    ("UserPromptSubmit", "user-prompt", 15),
+]
+
+#: Gemini CLI に登録するフック(~/.gemini/settings.json。発言ごとは BeforeAgent・ミリ秒)
+_GEMINI_HOOK_EVENTS: list[tuple[str, str, int]] = [
+    ("SessionEnd", "session-end", 180_000),
+    ("BeforeAgent", "user-prompt --event-name BeforeAgent", 15_000),
+]
+
+
 def register_claude_hooks(
     settings_path: Path,
     engram_cli: Path,
 ) -> tuple[bool, str]:
-    """~/.claude/settings.json に自動符号化・自発的想起のフックを登録する。冪等。
+    """~/.claude/settings.json に自動符号化・自発的想起のフックを登録する。冪等。"""
+    return register_agent_hooks(settings_path, engram_cli, _CLAUDE_HOOK_EVENTS)
 
+
+def register_codex_hooks(hooks_path: Path, engram_cli: Path) -> tuple[bool, str]:
+    """~/.codex/hooks.json に同じフックを登録する。冪等。
+
+    Codex は新しく足したフックを、利用者が /hooks で承認するまで動かさない(信頼の仕組み)。
+    """
+    return register_agent_hooks(hooks_path, engram_cli, _CODEX_HOOK_EVENTS)
+
+
+def register_gemini_hooks(settings_path: Path, engram_cli: Path) -> tuple[bool, str]:
+    """~/.gemini/settings.json に同じフックを登録する(Gemini CLI)。冪等。
+
+    Gemini CLI はフックを tools.enableHooks = true のときだけ動かす(既定は false。0.15.3 の実装で確認)。
+    登録だけでは動かないので、あわせてオンにする。
+    """
+    ok, msg = register_agent_hooks(settings_path, engram_cli, _GEMINI_HOOK_EVENTS, named=True)
+    if not ok:
+        return ok, msg
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        tools = data.setdefault("tools", {})
+        if tools.get("enableHooks") is not True:
+            tools["enableHooks"] = True
+            settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            msg = f"{msg}・フックを有効化(tools.enableHooks)"
+    except Exception as e:
+        return False, f"フックの有効化に失敗: {e}"
+    return True, msg
+
+
+def register_agent_hooks(
+    settings_path: Path,
+    engram_cli: Path,
+    events: list[tuple[str, str, int]],
+    *,
+    named: bool = False,
+) -> tuple[bool, str]:
+    """JSON 設定の "hooks" に自動符号化・自発的想起のフックを登録する。冪等。
+
+    Claude Code・Codex・Gemini CLI は同じ形({"hooks": {イベント: [{"hooks": [{type, command,
+    timeout}]}]}})を読む。named=True は Gemini CLI 用に "name" を付ける。
     - 既に同じコマンドが登録済みならスキップ
     - engram のフックだがパスが古い場合は更新
-    - engram 以外のフックには触れない
+    - engram 以外のフックや設定には触れない
     - 壊れた JSON は変更しない(破壊的変更をしない)
     """
     try:
@@ -258,13 +313,13 @@ def register_claude_hooks(
                 try:
                     data = json.loads(raw)
                 except Exception:
-                    return False, "既存の settings.json が解析できないため変更しません(手動で修復してください)"
+                    return False, f"既存の {settings_path.name} が解析できないため変更しません(手動で修復してください)"
         else:
             data = {}
 
         hooks = data.setdefault("hooks", {})
         changed = []
-        for event, hook_arg, timeout in _CLAUDE_HOOK_EVENTS:
+        for event, hook_arg, timeout in events:
             command = f'"{engram_cli}" hook {hook_arg}'
             entries = hooks.setdefault(event, [])
             found = False
@@ -277,13 +332,10 @@ def register_claude_hooks(
                             changed.append(f"{event}(パス更新)")
                         h.setdefault("timeout", timeout)
             if not found:
-                entries.append({
-                    "hooks": [{
-                        "type": "command",
-                        "command": command,
-                        "timeout": timeout,
-                    }]
-                })
+                hook = {"type": "command", "command": command, "timeout": timeout}
+                if named:
+                    hook = {"name": "engram", **hook}
+                entries.append({"hooks": [hook]})
                 changed.append(event)
 
         if not changed:
@@ -297,6 +349,15 @@ def register_claude_hooks(
         return False, f"登録失敗: {e}"
 
 
+def _has_protocol(text: str) -> bool:
+    """指示ファイルに記憶プロトコルが既に入っているか。
+
+    以前は "engram" の語があるだけで追記を飛ばしており、利用者が engram に触れた
+    メモを書いているだけでプロトコルが入らなかった。追記する見出しか正本のファイル名で判定する。
+    """
+    return "記憶プロトコル(engram)" in text or "MEMORY_PROTOCOL.md" in text
+
+
 def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, str]:
     """~/.claude/CLAUDE.md に記憶プロトコルの @import を追記する。冪等。"""
     try:
@@ -304,7 +365,7 @@ def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, s
         existing = ""
         if claude_md_path.is_file():
             existing = claude_md_path.read_text(encoding="utf-8")
-        if "engram" in existing:
+        if _has_protocol(existing):
             return True, "既追記済み(スキップ)"
         abs_path = str(protocol_path.resolve()).replace("\\", "/")
         addition = f"\n# 記憶プロトコル(engram)\n\n@{abs_path}\n"
@@ -320,7 +381,7 @@ def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, s
 # ---------------------------------------------------------------------------
 
 # Codex の MCP 初期接続タイムアウト既定値(30秒)では、engram の起動
-# (埋め込みモデル約529MBの読込+記憶フォルダ確認)が間に合わないことがある
+# (埋め込みモデル約530MBの読込+記憶フォルダ確認)が間に合わないことがある
 # (実機で接続失敗が発生)。登録時に起動待ち時間を明示して回避する
 _CODEX_STARTUP_TIMEOUT_SEC = "120.0"
 
@@ -434,7 +495,7 @@ def update_agents_md(
         existing = ""
         if agents_md_path.is_file():
             existing = agents_md_path.read_text(encoding="utf-8")
-        if "engram" in existing:
+        if _has_protocol(existing):
             return True, "既追記済み(スキップ)"
         protocol_text = ""
         if protocol_path.is_file():
@@ -459,7 +520,8 @@ def register_gemini_mcp(
     mcp_config_path: Path,
     engram_mcp_path: Path,
 ) -> tuple[bool, str]:
-    """~/.gemini/config/mcp_config.json に engram エントリを追加する。冪等。"""
+    """mcpServers を持つ JSON 設定(Gemini CLI の ~/.gemini/settings.json、Antigravity の
+    ~/.gemini/config/mcp_config.json)に engram エントリを追加する。冪等。"""
     try:
         mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
         if mcp_config_path.is_file():
@@ -473,7 +535,7 @@ def register_gemini_mcp(
                 except Exception:
                     # 壊れた既存設定を空で上書きすると他サーバーの登録が消える。
                     # 触らずに中断して手動修復を促す(破壊的変更をしない)
-                    return False, "既存の mcp_config.json が解析できないため変更しません(手動で修復してください)"
+                    return False, f"既存の {mcp_config_path.name} が解析できないため変更しません(手動で修復してください)"
         else:
             data = {"mcpServers": {}}
 
@@ -513,7 +575,7 @@ def update_gemini_md(
         existing = ""
         if gemini_md_path.is_file():
             existing = gemini_md_path.read_text(encoding="utf-8")
-        if "engram" in existing:
+        if _has_protocol(existing):
             return True, "既追記済み(スキップ)"
         abs_path = str(protocol_path.resolve()).replace("\\", "/")
         addition = (
@@ -663,12 +725,20 @@ def schedule_step(cfg_path: Path, home: Path, *, schedule: bool | None,
         for kind in ("night", "dmn"):
             set_config_scalar(cfg_path, f"schedule_{kind}", False)
     labels = {"night": ("夜の整理", "毎晩 2:30"), "dmn": ("DMN(自発思考)", "15分毎")}
+    llm_ok = _local_llm_ok()
     for kind in ("night", "dmn"):
         name, when = labels[kind]
         if not read_config_toml(cfg_path).get(f"schedule_{kind}", True):
             print(f"  {name}: 止めてあります(設定 schedule_{kind} = false)")
             notices.append(f"{name}は止めてあります。動かすには: engram {kind} --install")
             results.append((f"{name}の自動実行", True, "止めてある(利用者の設定)"))
+            continue
+        # DMN の考える係はローカル LLM だけ。無い PC で15分ごとに空振りさせない
+        if kind == "dmn" and not llm_ok:
+            print(f"  {name}: ローカル LLM(Ollama)が無いので登録しません")
+            notices.append(f"{name}はローカル LLM で考えるので、今は登録していません。Ollama を入れて"
+                           " `ollama pull gemma4:e2b` のあと: engram dmn --install")
+            results.append((f"{name}の自動実行", True, "ローカル LLM が無いので未登録"))
             continue
         # 同じ名前で利用者が自前の仕組みを登録している場合や、別のホームの登録は上書きしない
         who = sched.owner(kind, home, suffix=suffix) if hasattr(sched, "owner") else "none"
@@ -685,6 +755,9 @@ def schedule_step(cfg_path: Path, home: Path, *, schedule: bool | None,
 
     # 入れた人の claude / codex を夜に使うかは、本人に聞いてから(既定は使わない)
     notices += consent_step(cfg_path, home, interactive=interactive, ask=ask)
+    # 仮説サイクル(毎日)も、Web 検索と記憶の外部送信を伴うので本人に聞いてから
+    notices += hyp_step(cfg_path, home, interactive=interactive, ask=ask, sched=sched,
+                        suffix=suffix, results=results)
 
     # 夜の整理・DMN が実際に頭を使えるか(同意のあるものと、ローカル LLM)
     try:
@@ -697,15 +770,110 @@ def schedule_step(cfg_path: Path, home: Path, *, schedule: bool | None,
         else:
             notices.append("夜の整理の要約に使える AI がありません(ローカル LLM も同意済みの CLI も無い)。"
                            "沈黙・常連抑制は動き、要約は翌セッションの促しで行います")
-        if not LocalLLMProbe.available(settings):
-            notices.append("DMN と夜の蒸留はローカル LLM(Ollama)が無いので休みます。"
+        if not llm_ok:
+            notices.append("夜の蒸留と画像の説明文はローカル LLM(Ollama)が無いので休みます。"
                            f"使うには Ollama を入れて: ollama pull {settings.llm_model}")
     except Exception as exc:  # 案内の失敗で setup を止めない
         print(f"  (使える頭の確認に失敗: {exc})")
 
-    if not read_config_toml(cfg_path).get("media_enabled", False):
-        notices.append("媒体の棚(画像・動画・文書を言葉で探す)は、数GBの追加導入(torch など)が要るので"
-                       "止めてあります。オンにするには: engram media setup")
+    notices += media_step(cfg_path, interactive=interactive, ask=ask)
+    return notices
+
+
+def media_step(cfg_path: Path, *, interactive: bool, ask=input, installer=None) -> list[str]:
+    """媒体の棚を入れるかを、対話の setup で1回だけ聞く(数GBの導入が要るので既定は入れない)。
+
+    答えは media_enabled に残し、「いいえ」の人には次から聞かない。installer はテスト差し替え用。
+    """
+    cfg = read_config_toml(cfg_path)
+    if cfg.get("media_enabled") is True:
+        return []
+    off = ["媒体の棚(画像・動画・文書を言葉で探す)は、数GBの追加導入(torch など)が要るので"
+           "止めてあります。オンにするには: engram media setup"]
+    if "media_enabled" in cfg or not interactive:
+        return off
+    q = ("  媒体の棚(画像・動画・文書を言葉で探す)を入れますか。torch などの部品を数GBダウンロードし、"
+         "数分かかります。[y/N]: ")
+    try:
+        ans = ask(q).strip().lower()
+    except (EOFError, OSError):
+        return off
+    if ans not in ("y", "yes", "はい"):
+        set_config_scalar(cfg_path, "media_enabled", False)
+        return off
+    if installer is None:
+        def installer():
+            from .config import get_settings
+            from .media import enable, setup_env
+            s = get_settings()
+            res = setup_env(s, source="git+https://github.com/ricoaiproject-cmd/engram.git")
+            if res.get("ok"):
+                enable(s, config_file=cfg_path)
+            return res
+    print("  媒体の棚を入れています(数分かかります)...")
+    res = installer()
+    if res.get("ok"):
+        print("  媒体の棚: 入れました(毎晩の整理で差分を索引します)")
+        return []
+    return ["媒体の棚の導入に失敗しました。あとから: engram media setup"]
+
+
+def _local_llm_ok() -> bool:
+    try:
+        from .config import get_settings
+        return bool(LocalLLMProbe.available(get_settings()))
+    except Exception:
+        return False
+
+
+#: 仮説サイクルを回せる CLI: (名前, 表示名, 送り先)
+HYP_AGENTS = [("claude", "Claude Code", "Anthropic"), ("codex", "Codex", "OpenAI")]
+
+
+def hyp_step(cfg_path: Path, home: Path, *, interactive: bool, ask, sched, suffix: str,
+             results: list, which=shutil.which) -> list[str]:
+    """仮説サイクルを毎日回すかを本人に聞き、同意があれば OS スケジューラに登録する。
+
+    設定 hyp_agent: ""=まだ聞いていない / "none"=回さない / "claude" / "codex"。
+    Web で調べものをし、記憶の一部を外へ送り、利用枠を使うので既定は回さない。
+    """
+    notices: list[str] = []
+    agent = str(read_config_toml(cfg_path).get("hyp_agent", "") or "")
+    if agent == "none":
+        print("  仮説サイクル: 回しません(回すなら engram hyp-run --use claude など)")
+        return notices
+    if not agent:
+        found = [(k, label, vendor) for k, label, vendor in HYP_AGENTS if which(k) is not None]
+        if not found:
+            notices.append("仮説サイクル(記憶から仮説を立てて Web で確かめる)を毎日回すには、"
+                           "Claude Code か Codex が要ります。入れたあと: engram hyp-run --use claude")
+            return notices
+        if not interactive:
+            k = found[0][0]
+            notices.append(f"仮説サイクルを毎日回すには: engram hyp-run --use {k}"
+                           "(Web で調べものをし、記憶の一部を送り、利用枠を使います)")
+            return notices
+        for k, label, vendor in found:
+            q = (f"  仮説サイクル(毎日7時30分)を {label} で回しますか。記憶の組から仮説を立てて Web で確かめます。"
+                 f"利用枠を使い、記憶の一部を {vendor} と検索先へ送ります。[y/N]: ")
+            try:
+                ans = ask(q).strip().lower()
+            except (EOFError, OSError):
+                return notices
+            if ans in ("y", "yes", "はい"):
+                agent = k
+                break
+        set_config_scalar(cfg_path, "hyp_agent", agent or "none")
+        if not agent:
+            print("  仮説サイクル: 回しません(あとから回すなら engram hyp-run --use claude など)")
+            return notices
+    if hasattr(sched, "owner") and sched.owner("hyp", home, suffix=suffix) == "other":
+        notices.append("仮説サイクル: 同じ名前の登録が別の仕組みのものなので上書きしていません")
+        return notices
+    ok, msg = sched.install("hyp", home=home, suffix=suffix)
+    results.append(("仮説サイクルの自動実行", ok, f"毎日 7:30・{agent}" if ok else msg))
+    print("  仮説サイクル: " + (f"毎日 7:30 に {agent} で回します(やめるには engram hyp-run --stop)"
+                              if ok else f"登録に失敗しました({msg})"))
     return notices
 
 
@@ -834,7 +1002,7 @@ def setup_main(
     # Step 4: 埋め込みモデルの取得
     # ------------------------------------------------------------------
     print("[4/7] 埋め込みモデルの取得")
-    print("  初回は約500MBをダウンロードします(既にキャッシュがあればスキップ)...")
+    print("  初回は約530MBをダウンロードします(既にキャッシュがあればスキップ)...")
     embedder = None
     try:
         from .embedder import RuriEmbedder
@@ -949,7 +1117,7 @@ def setup_main(
                 results.append(("Claude Code フック登録", ok3, msg3))
                 print(f"  Claude Code フック登録: {msg3}")
                 print("    - セッション終了時の自動記憶(SessionEnd)")
-                print("    - 関連記憶の自発的想起(UserPromptSubmit、まずは影モード)")
+                print("    - 関連記憶の自発的想起(UserPromptSubmit。関連記憶を文脈に差し込む active モード)")
             else:
                 results.append(("Claude Code フック登録", False, "engram CLI が見つかりません"))
                 print("  Claude Code フック登録: engram CLI が見つかりません")
@@ -975,6 +1143,15 @@ def setup_main(
             ok2, msg2 = update_agents_md(_codex_dir / "AGENTS.md", home / "MEMORY_PROTOCOL.md")
             results.append(("Codex AGENTS.md 更新", ok2, msg2))
             print(f"  Codex AGENTS.md 更新: {msg2}")
+
+            # フック(自動符号化・自発的想起)。Codex は新しいフックを /hooks で承認するまで動かさない
+            engram_cli = get_engram_cli_path()
+            if engram_cli is not None:
+                ok3, msg3 = register_codex_hooks(_codex_dir / "hooks.json", engram_cli)
+                results.append(("Codex フック登録", ok3, msg3))
+                print(f"  Codex フック登録: {msg3}")
+                if ok3 and "スキップ" not in msg3:
+                    print("    - Codex を開いて /hooks で engram のフックを承認すると動き始めます")
         else:
             print("  Codex: 未検出(インストールされていれば後で `engram setup` を再実行)")
     else:
@@ -986,16 +1163,27 @@ def setup_main(
     # --- Gemini / Antigravity ---
     if "gemini" in selected_agents:
         if _gemini_dir.is_dir() and engram_mcp is not None:
+            # Gemini CLI は ~/.gemini/settings.json の mcpServers を読み、
+            # Antigravity は ~/.gemini/config/mcp_config.json を読む。両方に登録する
+            ok, msg = register_gemini_mcp(_gemini_dir / "settings.json", engram_mcp)
+            results.append(("Gemini CLI settings.json 更新", ok, msg))
+            print(f"  Gemini CLI settings.json 更新: {msg}")
             ok, msg = register_gemini_mcp(
                 _gemini_dir / "config" / "mcp_config.json",
                 engram_mcp,
             )
-            results.append(("Gemini mcp_config.json 更新", ok, msg))
-            print(f"  Gemini mcp_config.json 更新: {msg}")
+            results.append(("Antigravity mcp_config.json 更新", ok, msg))
+            print(f"  Antigravity mcp_config.json 更新: {msg}")
 
             ok2, msg2 = update_gemini_md(_gemini_dir / "GEMINI.md", home / "MEMORY_PROTOCOL.md")
             results.append(("Gemini GEMINI.md 更新", ok2, msg2))
             print(f"  Gemini GEMINI.md 更新: {msg2}")
+
+            engram_cli = get_engram_cli_path()
+            if engram_cli is not None:
+                ok3, msg3 = register_gemini_hooks(_gemini_dir / "settings.json", engram_cli)
+                results.append(("Gemini CLI フック登録", ok3, msg3))
+                print(f"  Gemini CLI フック登録: {msg3}")
         else:
             print("  Antigravity/Gemini: 未検出(インストールされていれば後で `engram setup` を再実行)")
     else:
@@ -1350,7 +1538,7 @@ def doctor_main(
     # CLAUDE.md
     claude_md = Path.home() / ".claude" / "CLAUDE.md"
     if claude_md.is_file():
-        has_engram = "engram" in claude_md.read_text(encoding="utf-8", errors="replace")
+        has_engram = _has_protocol(claude_md.read_text(encoding="utf-8", errors="replace"))
         row("CLAUDE.md engram 組み込み", "[OK]" if has_engram else "[NG]",
             str(claude_md) if has_engram else f"未追記: {claude_md}")
     else:
@@ -1428,7 +1616,7 @@ def doctor_main(
     # AGENTS.md
     agents_md = Path.home() / ".codex" / "AGENTS.md"
     if agents_md.is_file():
-        has_engram = "engram" in agents_md.read_text(encoding="utf-8", errors="replace")
+        has_engram = _has_protocol(agents_md.read_text(encoding="utf-8", errors="replace"))
         row("AGENTS.md engram 組み込み", "[OK]" if has_engram else "[NG]",
             "組み込み済み" if has_engram else "未追記")
     else:
@@ -1453,7 +1641,7 @@ def doctor_main(
     # GEMINI.md
     gemini_md = Path.home() / ".gemini" / "GEMINI.md"
     if gemini_md.is_file():
-        has_engram = "engram" in gemini_md.read_text(encoding="utf-8", errors="replace")
+        has_engram = _has_protocol(gemini_md.read_text(encoding="utf-8", errors="replace"))
         row("GEMINI.md engram 組み込み", "[OK]" if has_engram else "[NG]",
             "組み込み済み" if has_engram else "未追記")
     else:

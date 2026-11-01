@@ -408,6 +408,16 @@ def main() -> None:
     p_dmn.add_argument("--force-schedule", dest="force_schedule", action="store_true",
                        help="同じ名前の登録が別のホームや別の仕組みのものでも、上書き・削除する")
 
+    # --- hyp-run(仮説サイクルを1回回す。毎日の自動実行の登録もここ) ---
+    p_hyp = subparsers.add_parser(
+        "hyp-run",
+        help="仮説サイクルを1回回す(選んだ CLI で。Web で調べものをし、記憶の一部を送る)",
+    )
+    p_hyp.add_argument("--use", choices=["claude", "codex"], default=None,
+                       help="この CLI で毎日回すことに同意し、毎日 7:30 の自動実行を登録する")
+    p_hyp.add_argument("--stop", action="store_true", help="回さない(自動実行も外す)")
+    p_hyp.add_argument("--home", default=None, help="扱う engram のホーム(スケジューラ登録が付ける)")
+
     # --- rsi(ループ回転計) ---
     p_rsi = subparsers.add_parser(
         "rsi",
@@ -485,6 +495,10 @@ def main() -> None:
         choices=["session-end", "user-prompt"],
         help="フックイベント名",
     )
+    p_hook.add_argument(
+        "--event-name", default="UserPromptSubmit",
+        help="応答の hookEventName(Gemini CLI は BeforeAgent)",
+    )
 
     args = parser.parse_args()
 
@@ -547,7 +561,7 @@ def main() -> None:
         if args.event == "session-end":
             sys.exit(run_session_end())
         else:
-            sys.exit(run_user_prompt())
+            sys.exit(run_user_prompt(event_name=args.event_name))
 
     if args.command == "surface":
         from pathlib import Path
@@ -744,6 +758,26 @@ def main() -> None:
             res = _media.run_nightly(settings)
             print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
             sys.exit(0 if res.get("ok") else 1)
+
+    if args.command == "hyp-run":
+        from .config import config_path, get_settings
+        from . import hyp_run, scheduler
+        from .setup import set_config_scalar
+
+        settings = get_settings()
+        sfx = settings.schedule_task_suffix
+        if args.use or args.stop:
+            set_config_scalar(config_path(), "hyp_agent", args.use or "none")
+            if args.use:
+                ok, msg = scheduler.install("hyp", home=settings.data_dir, suffix=sfx)
+                print(f"仮説サイクルを毎日 7:30 に {args.use} で回します" if ok else f"登録に失敗しました: {msg}")
+            else:
+                ok, msg = scheduler.uninstall("hyp", suffix=sfx, home=settings.data_dir)
+                print("仮説サイクルを回さないようにしました" + ("" if ok else f"(自動実行は外せませんでした: {msg})"))
+            sys.exit(0 if ok else 1)
+        res = hyp_run.run(settings)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0)
 
     if args.command in ("night", "dmn"):
         from .config import get_settings
