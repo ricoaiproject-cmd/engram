@@ -983,4 +983,4 @@ class TestSetupMainOnnxExport:
         out = capsys.readouterr().out
         assert len(calls) == 1
         assert "警告: ONNX変換に失敗しました" in out
-        assert "[6/6] 動作確認" in out
+        assert "[7/7] 動作確認" in out

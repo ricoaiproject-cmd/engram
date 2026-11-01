@@ -79,6 +79,38 @@ def ensure_night_files(settings: Settings) -> tuple[Path, Path]:
     return agents, prompt
 
 
+# 従量課金の API キーが環境にあると、その CLI は利用枠(定額)ではなく鍵で課金されうる。
+# 毎晩黙って料金がかかるのを避けるため、既定では使わない(night_agents_allow_api_key で許可)
+API_KEY_ENVS = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
+
+
+def agent_unusable_reason(line: str, settings: Settings) -> str | None:
+    """その行のエージェントを今夜使えない理由(使えるなら None)。手元にあるものを自動で選ぶため。"""
+    try:
+        exe = shlex.split(line, posix=(os.name != "nt"))[0]
+    except (ValueError, IndexError):
+        return f"{line} (読めない行)"
+    if shutil.which(exe) is None:
+        return f"{exe} (見つからない)"
+    env = API_KEY_ENVS.get(Path(exe).stem.lower())
+    if env and os.environ.get(env) and not settings.night_agents_allow_api_key:
+        return f"{exe} ({env} があり従量課金になりうるため。使うなら night_agents_allow_api_key = true)"
+    return None
+
+
+def available_agents(settings: Settings) -> list[tuple[str, str | None]]:
+    """sleep_agents.txt の各行と、使えない理由(使えるなら None)。setup の案内用。"""
+    agents_file, _ = ensure_night_files(settings)
+    out = []
+    for line in read_agent_lines(agents_file):
+        if line == LOCAL_LLM_LINE:
+            ok = LocalLLM.from_settings(settings).available()
+            out.append((line, None if ok else "ローカル LLM(Ollama)に届かない"))
+        else:
+            out.append((line, agent_unusable_reason(line, settings)))
+    return out
+
+
 def read_agent_lines(path: Path) -> list[str]:
     if not path.is_file():
         return []
@@ -291,6 +323,10 @@ def run_integration(engine, settings: Settings, *, dry_run: bool,
             log_line(settings, "agent OK")
             result["done_by"] = line
             break
+        why = agent_unusable_reason(line, settings) if runner is None else None
+        if why:
+            log_line(settings, f"agent skip: {why}")
+            continue
         try:
             argv = shlex.split(line, posix=(os.name != "nt")) + [prompt]
             if runner is not None:

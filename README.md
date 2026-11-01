@@ -333,7 +333,7 @@ SQLite インデックスは常にローカルに置かれるので同期競合�
 | `consolidation_candidates` / `mark_consolidated` | 統合(下記) |
 | `skill_candidates` | 同じ形の作業の episode が溜まったとき、スキル(手順書)に切り出す候補を見る |
 | `hypothesis_seeds` / `hypothesize` / `hypotheses` / `resolve_hypothesis` | 仮説サイクル(下記「仮説サイクル」) |
-| `remember_file(path, note, room)` / `media_status` | 媒体の棚(下記「媒体の棚」。既定は切)。探すときは `recall(modality="image")` など |
+| `remember_file(path, note, room)` / `media_status` | 媒体の棚(下記「媒体の棚」。`engram media setup` でオン)。探すときは `recall(modality="image")` など |
 
 ### 統合(睡眠に相当する処理)
 
@@ -376,9 +376,16 @@ v0.3 までは「記憶を持つ」ところまででした。v0.13 以降は、
 
 | コマンド | 何をするか | いつ動くか |
 |---|---|---|
-| `engram night` | 眠り一式: ①統合(LLM) → ②沈黙・常連抑制 → ③蒸留(LLM) → ④追加処理 `night.d/` | 毎晩(`--install` で OS スケジューラ登録) |
+| `engram night` | 眠り一式: ①統合(LLM) → ②沈黙・常連抑制 → ③蒸留(LLM) → ④追加処理 `night.d/` | 毎晩 2:30(`engram setup` が登録) |
 | `engram sleep --commit` | ②だけ(純 Python・モデル非依存) | night の中で自動実行 |
-| `engram dmn` | DMN(自発思考): 入力の無い時間に世界の差分を見て「ふと浮かんだこと」を日記と記憶に残す | 15分毎(`--install`) |
+| `engram dmn` | DMN(自発思考): 入力の無い時間に世界の差分を見て「ふと浮かんだこと」を日記と記憶に残す | 15分毎(`engram setup` が登録) |
+
+`engram setup`(1行インストーラが最後に自動で実行します)が、眠りと DMN を OS のスケジューラ(Windows は
+タスクスケジューラ、ほかは crontab)に登録するので、入れた日の夜から回り始めます。**止めるには
+`engram night --uninstall` / `engram dmn --uninstall`**(止めたことは設定に残り、setup をやり直しても戻りません)。
+同じ名前(`EngramSleepNight` / `EngramDMN`)で自前の仕組みを登録している場合や、別のホームの engram が
+登録したものは、上書きも削除もしません(置き換えるなら `--force-schedule`)。同じ PC に2つ入れるときは、
+設定の `schedule_task_suffix` でタスク名を分けてください。
 | `engram metabolism` | 記憶側の物差し: 浮上命中率・書き込み量・hot在庫・統合の滞留 | いつでも |
 | `engram rsi` | ループ側の物差し: 自律反復/日・提案採用率・DMN朝送り率 | いつでも |
 
@@ -387,15 +394,18 @@ v0.3 までは「記憶を持つ」ところまででした。v0.13 以降は、
 ```powershell
 engram night --dry-run     # 何も書かず段取りだけ見る
 engram night               # 1晩ぶん実行
-engram night --install     # 毎晩 02:30 に自動実行(Windows: schtasks / Unix: crontab)
+engram night --install     # 毎晩の自動実行を登録し直す(setup が済ませているので普通は不要。--time で時刻)
+engram night --uninstall   # 毎晩の自動実行を止める
 ```
 
 1. **統合(LLM)** — `~/.engram/sleep_agents.txt` の優先順でエージェント CLI(例: `claude -p`、`codex exec`)を試し、
    `~/.engram/sleep_prompt.md` の手順で episode クラスタを knowledge に要約させます。特別行 `local-llm` は
    engram 内蔵のローカル LLM 統合(Ollama 互換 API、既定 `gemma4:e2b`)です。**全滅した夜は翌セッションの
    ナッジに自動縮退**するので、LLM が1つも無くても壊れません。モデルを替えるときはコードでなくこのファイルを編集します。
-   `claude -p` や `codex exec` は、あなた自身のアカウントの利用枠で毎晩1回動きます。使わせたくない行は
-   `sleep_agents.txt` から消すか、行頭に `#` を付けてください。
+   `claude -p` や `codex exec` は、あなた自身のアカウントの利用枠で毎晩1回動きます。手元に無いコマンドの行は
+   飛ばすので、入っているものが上から順に自動で選ばれます。`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` が環境にあると
+   従量課金になりうるため、その CLI は使いません(使うなら `night_agents_allow_api_key = true`)。
+   使わせたくない行は `sleep_agents.txt` から消すか、行頭に `#` を付けてください。
 2. **沈黙・常連抑制** — 使われない hot 記憶を cold へ(削除はしない)。reinforce されないまま浮上を繰り返す
    記憶は一定期間黙らせます。統合を沈黙より**先**に置くのは、統合の材料が消化前に沈むのを防ぐためです。
 3. **蒸留(LLM)** — 直近48時間の自動符号化 episode から「後日の別の作業でも役立つ知見」だけを抽出し、
@@ -428,8 +438,11 @@ llm_model = "gemma4:e2b"                                # 眠り・蒸留・DMN 
 
 ```powershell
 engram dmn --force --dry-run   # いま1回考えさせて表示だけ(書かない)
-engram dmn --install           # 15分毎に自動実行
+engram dmn --uninstall         # 15分毎の自動実行を止める(戻すときは --install)
 ```
+
+DMN の考える係はローカル LLM なので、Ollama が無い PC では起きても何もせずに終わります
+(料金も外部への送信もありません)。使うには Ollama を入れて `ollama pull gemma4:e2b` です。
 
 ### 回転計(`engram rsi`)
 
@@ -507,11 +520,16 @@ hyp_max_attempts = 2                      # 判定不能のときの再挑戦の
 
 ---
 
-## 媒体の棚 — 画像・動画・文書を言葉で探す(v0.24・既定は切)
+## 媒体の棚 — 画像・動画・文書を言葉で探す(v0.24)
 
 文章の記憶とは別に、画像・動画・文書(PDF・Office 文書)・音声を「見た目・音」で索引し、
 「前に作ったあの図」「あの画面写真」のように言葉で探せるようにする棚です。
-**既定では切ってあり、入れなければ何も動きません。**
+**数GBの追加導入(torch など)が要るため、セットアップでは入れずに止めてあります。**
+オンにするのは次の1行です(セットアップの最後にも表示されます):
+
+```powershell
+engram media setup   # 環境を作り、有効にし、対象フォルダ(未設定なら画像フォルダ)と毎晩の差分索引を登録する
+```
 
 ### 何に頼るか
 
@@ -528,22 +546,20 @@ hyp_max_attempts = 2                      # 判定不能のときの再挑戦の
 
 ### 入れ方
 
-1. 設定で有効にし、索引するフォルダを書きます(フォルダごとに部屋も決めます):
+1. `engram media setup` を実行します。別の仮想環境と部品を入れ(数分・数GB)、`media_enabled = true` にし、
+   対象フォルダが未設定なら `~/Pictures/Screenshots`(無ければ `~/Pictures`)を足し、毎晩の眠り(night.d)に
+   差分索引を置きます。
+
+2. 対象フォルダを変えるときは設定に書きます(フォルダごとに部屋も決めます):
 
    ```toml
    # ~/.engram/config.toml
-   media_enabled = true
    media_roots = { "~/Pictures/Screenshots" = "common", "~/Documents/work" = "work" }
    media_kinds = ["image", "video", "document"]   # 音声は精度が大分類止まりのため既定で外す
    ```
 
-2. 索引係の環境を作り、最初の索引を作ります:
-
-   ```powershell
-   engram media setup          # 別の仮想環境と部品を入れる(数分・数GB)
-   engram media index --wait   # 対象フォルダを走査して索引(初回は件数に応じて時間がかかる)
-   engram media install        # 毎晩の眠り(night.d)に差分索引を加える
-   ```
+   すぐ索引したいときは `engram media index --wait`(初回は件数に応じて時間がかかります)。何もしなくても、
+   その夜の眠りで差分が索引されます。
 
 3. 探します: エージェントからは `recall(query, modality="image")`(`"video"` `"document"` `"media"` も可)、
    手元からは `engram media find "青い表紙の企画書"`。ファイル1件をすぐ覚えさせるときは
@@ -582,7 +598,7 @@ Gmail の添付ファイルを、読み取り専用で棚に取り込めます�
 ### 撤去
 
 ```powershell
-engram media uninstall                 # 索引係を止め、夜間処理から外す(索引と記憶本体は残る)
+engram media uninstall                 # 索引係を止め、夜間処理から外し、media_enabled = false にする(索引と記憶本体は残る)
 engram media uninstall --purge-index   # 媒体の索引も消す
 engram media uninstall --purge-env     # 仮想環境・モデル・索引フォルダも消す
 ```
@@ -601,9 +617,11 @@ engram の基本(記憶する・思い出す・自発的想起)は、本体だ�
 | 埋め込みの常駐プロセス | なし(フックが自動で起動する) | 各セッションが自分でモデルを読み込む |
 | 夜の整理の統合(`engram night`) | `sleep_agents.txt` のエージェント CLI(`claude -p` など。自分の利用枠を使う)かローカル LLM | 翌セッションの促し(ナッジ)に切り替わる |
 | 夜の整理の蒸留・DMN・画像の説明文 | ローカル LLM(Ollama 互換。既定 `gemma4:e2b`) | その処理だけ飛ばす |
-| 毎晩・15分毎の自動実行 | `engram night --install` / `engram dmn --install`(Windows はタスクスケジューラ、ほかは crontab) | 手で実行したときだけ動く |
+| 毎晩・15分毎の自動実行 | なし(`engram setup` が Windows はタスクスケジューラ、ほかは crontab に登録する) | 止めた人(`--uninstall`・`engram setup --no-schedule`)は手で実行したときだけ動く |
 | 仮説サイクル | 毎日回すエージェント(Web で確かめられるもの) | 種選びと台帳は使えるが、判定は進まない |
-| 媒体の棚 | 別の仮想環境(数GB)。Office 文書には LibreOffice。説明文にはローカル LLM | 既定で切 |
+| 媒体の棚 | 別の仮想環境(数GB)。Office 文書には LibreOffice。説明文にはローカル LLM | 数GBの導入が要るため止めてある。`engram media setup` の1行でオン |
+
+セットアップの最後に「止めてある機能・使えない機能」と、それぞれをオンにする1行が表示されます。
 | メール添付 | `engram[mail]` と Google の OAuth クライアント | 使わない |
 
 説明・メッセージ・LLM への指示文は日本語です(英語版は [engram-global](https://github.com/ricoaiproject-cmd/engram-global))。
@@ -757,7 +775,7 @@ curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/insta
 - 記憶・設定(`~/.engram` と記憶フォルダ)はそのまま残ります。消えません
 - 更新後は、engram を使う各エージェント(Claude Code 等)を再起動してください(MCP サーバーの再接続に必要)
 
-### v0.12.x から v0.25.2 へ上げる
+### v0.12.x から v0.25.3 へ上げる
 
 v0.12 から v0.25 までの間に、眠り・DMN・仮説サイクル・媒体の棚・埋め込みの常駐プロセスが加わりました。
 記憶のファイルと索引はそのまま使えます。上げるときにすることは次のとおりです。
@@ -765,8 +783,9 @@ v0.12 から v0.25 までの間に、眠り・DMN・仮説サイクル・媒体�
 1. 上の1行コマンドを実行します(セットアップも自動で走ります)。終わったら `engram doctor` で、
    使っているエージェントの行が `[OK]` になっていることを確かめます。
 2. engram を使う各エージェントを再起動します。
-3. 新しい機能は、使うものだけ有効にします。何もしなければ、夜の整理・DMN・媒体の棚は動きません
-   (`engram night --install`・`engram dmn --install`・「媒体の棚」の節を参照)。
+3. セットアップが、夜の整理(毎晩)と DMN(15分毎)を自動実行に登録します。止めたいものは
+   `engram night --uninstall` / `engram dmn --uninstall` で止められます。媒体の棚だけは数GBの追加導入が
+   要るので止めてあり、`engram media setup` の1行でオンになります(セットアップの最後にも表示されます)。
 
 v0.25.1 以前の常駐プロセスについて: 古い常駐プロセス(番号 51873)は、自分がどの記憶の係かを名乗らない
 ため、v0.25.2 からは別の engram として扱われ、使われも止められもしません。v0.25.2 は記憶の置き場から
@@ -789,6 +808,11 @@ claude mcp remove engram
 # 2. ~/.claude/CLAUDE.md から engram のブロックを手動削除
 # 3. ~/.codex/config.toml から [mcp_servers.engram] ブロックを手動削除
 # 4. ~/.gemini/config/mcp_config.json から engram エントリを手動削除
+
+# 4b. 自動実行(夜の整理・DMN)と媒体の棚の登録を外す(本体を消す前に)
+engram night --uninstall
+engram dmn --uninstall
+engram media uninstall
 
 # 5. engram 本体をアンインストール
 uv tool uninstall engram

@@ -271,11 +271,23 @@ class Settings:
 
     # --- 夜間の眠り一式(engram night)---
     night_agent_timeout_sec: int = 1200     # 外部エージェント CLI・night.d の1本あたり上限
+    # ANTHROPIC_API_KEY / OPENAI_API_KEY が環境にあるとき claude / codex を夜に使うか
+    # (従量課金になりうるため既定は使わない。定額の利用枠でログインしていれば鍵は不要)
+    night_agents_allow_api_key: bool = False
     distill_window_hours: float = 48.0      # 蒸留の材料にする episode の新しさ
     distill_max_episodes: int = 10          # 1晩に蒸留する episode 数の上限
     # スキル自律作成の置き場と、使われない auto スキルの引退日数
     skills_dir: str = "~/.claude/skills"
     auto_skill_retire_days: int = 30
+
+    # --- 自動実行(OS スケジューラ)---
+    # engram setup が夜の整理(毎晩)と DMN(15分毎)を登録する。止めた人の意思は
+    # `engram night --uninstall` / `engram dmn --uninstall` がここに false で残し、
+    # setup を再実行しても勝手に戻さない。この1行を false にしても止められる
+    schedule_night: bool = True
+    schedule_dmn: bool = True
+    # 同じ PC に engram を2つ入れるとき、タスク名(EngramSleepNight 等)の後ろに付ける語
+    schedule_task_suffix: str = ""
 
     # --- DMN(自発思考。engram dmn)---
     # dmn_watch: 「世界の変化」として見張るファイル/フォルダ(更新されたら起きる理由になる)。

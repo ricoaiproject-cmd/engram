@@ -313,6 +313,11 @@ def main() -> None:
         metavar="AGENTS",
         help="登録するエージェントをカンマ区切りで指定(例: claude,codex)。省略時は検出された全部",
     )
+    p_setup.add_argument(
+        "--no-schedule",
+        action="store_true",
+        help="夜の整理(毎晩)と DMN(15分毎)の自動実行を登録しない(設定に schedule_night/schedule_dmn=false を残す)",
+    )
 
     # --- doctor ---
     subparsers.add_parser("doctor", help="環境診断を表示する")
@@ -381,6 +386,9 @@ def main() -> None:
     p_night.add_argument("--install", action="store_true", help="OSスケジューラに毎晩の実行を登録")
     p_night.add_argument("--uninstall", action="store_true", help="登録を解除")
     p_night.add_argument("--time", default="02:30", help="--install の実行時刻 HH:MM(既定 02:30)")
+    p_night.add_argument("--home", default=None, help="扱う engram のホーム(スケジューラ登録が付ける)")
+    p_night.add_argument("--force-schedule", dest="force_schedule", action="store_true",
+                         help="同じ名前の登録が別のホームや別の仕組みのものでも、上書き・削除する")
 
     # --- dmn(自発思考) ---
     p_dmn = subparsers.add_parser(
@@ -392,6 +400,9 @@ def main() -> None:
     p_dmn.add_argument("--install", action="store_true", help="OSスケジューラに15分毎の実行を登録")
     p_dmn.add_argument("--uninstall", action="store_true", help="登録を解除")
     p_dmn.add_argument("--every", type=int, default=15, help="--install の間隔(分・既定15)")
+    p_dmn.add_argument("--home", default=None, help="扱う engram のホーム(スケジューラ登録が付ける)")
+    p_dmn.add_argument("--force-schedule", dest="force_schedule", action="store_true",
+                       help="同じ名前の登録が別のホームや別の仕組みのものでも、上書き・削除する")
 
     # --- rsi(ループ回転計) ---
     p_rsi = subparsers.add_parser(
@@ -473,6 +484,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # スケジューラから起動された night / dmn は環境を引き継がないため、登録時のホームを
+    # --home で受け取る(設定の読み込みより先に効かせる)
+    if getattr(args, "home", None):
+        import os
+        os.environ["ENGRAM_HOME"] = args.home
+
     # setup / doctor はエンジン構築なしで動く
     if args.command == "setup":
         from .setup import parse_agents, setup_main
@@ -491,6 +508,7 @@ def main() -> None:
             memories_dir=memories_dir,
             non_interactive=args.non_interactive,
             agents=selected_agents,
+            schedule=not args.no_schedule,
         )
         return
 
@@ -698,7 +716,10 @@ def main() -> None:
                 sys.exit(0 if ok else 1)
             return
         if mc == "setup":
+            # 1行でオンにする: 環境づくり → 有効化 → 対象フォルダ(未設定なら既定) → 夜間の差分索引
             res = _media.setup_env(settings, source=args.source, python=args.python, upgrade=args.upgrade)
+            if res.get("ok"):
+                res["enabled"] = _media.enable(settings)
             print(json.dumps(res, ensure_ascii=False, indent=2))
             sys.exit(0 if res.get("ok") else 1)
         if mc == "install":
@@ -710,7 +731,10 @@ def main() -> None:
                 print("索引や環境を消す撤去です。--yes を付けて実行してください(記憶本体は無変更)。")
                 sys.exit(2)
             res = _media.uninstall(settings, purge_index=args.purge_index, purge_env=args.purge_env)
-            print("\n".join(res["done"]) or "撤去するものはありませんでした")
+            from .config import config_path
+            from .setup import set_config_scalar
+            set_config_scalar(config_path(), "media_enabled", False)
+            print("\n".join(res["done"] + ["設定を media_enabled = false にした"]))
             return
         if mc == "nightly":
             res = _media.run_nightly(settings)
@@ -723,12 +747,23 @@ def main() -> None:
 
         settings = get_settings()
         if args.install or args.uninstall:
+            from .config import config_path
+            from .setup import set_config_scalar
+
+            sfx = settings.schedule_task_suffix
+            # 別のホームや別の仕組みの登録は、--force が無ければ上書きも削除もしない
             if args.uninstall:
-                ok, msg = scheduler.uninstall(args.command)
+                ok, msg = scheduler.uninstall(args.command, suffix=sfx, home=settings.data_dir,
+                                              force=args.force_schedule)
             elif args.command == "night":
-                ok, msg = scheduler.install("night", night_time=args.time)
+                ok, msg = scheduler.install("night", night_time=args.time, home=settings.data_dir,
+                                            suffix=sfx, force=args.force_schedule)
             else:
-                ok, msg = scheduler.install("dmn", dmn_minutes=args.every)
+                ok, msg = scheduler.install("dmn", dmn_minutes=args.every, home=settings.data_dir,
+                                            suffix=sfx, force=args.force_schedule)
+            # 止めた/戻した意思を設定に残す(setup の再実行で勝手に戻さないため)
+            if ok:
+                set_config_scalar(config_path(), f"schedule_{args.command}", bool(args.install))
             print(("登録" if args.install else "解除") + ("完了: " if ok else "失敗: ") + msg)
             sys.exit(0 if ok else 1)
 

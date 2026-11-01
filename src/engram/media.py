@@ -401,6 +401,39 @@ def install_plugin(settings: Settings) -> Path:
     return p
 
 
+def default_roots() -> dict:
+    """対象フォルダが未設定のときの既定。画面写真があればそこ、無ければ画像フォルダ全体。"""
+    pics = Path.home() / "Pictures"
+    for cand in (pics / "Screenshots", pics):
+        if cand.is_dir():
+            return {str(cand): "common"}
+    return {}
+
+
+def enable(settings: Settings, config_file: Path | None = None) -> dict:
+    """媒体の棚をオンにする: media_enabled=true、対象フォルダが無ければ既定を足す、夜間の差分索引を置く。
+
+    設定ファイルは該当の行と区画だけを書き足す(利用者の他の設定には触れない)。
+    """
+    from .config import config_path
+    from .setup import read_config_toml, set_config_scalar
+
+    cfg = config_file or config_path()
+    set_config_scalar(cfg, "media_enabled", True)
+    out: dict = {"media_enabled": True}
+    if not read_config_toml(cfg).get("media_roots") and not settings.media_roots:
+        roots = default_roots()
+        if roots:
+            body = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
+            if body and not body.endswith("\n"):
+                body += "\n"
+            body += "\n[media_roots]\n" + "".join(f"'{k}' = '{v}'\n" for k, v in roots.items())
+            cfg.write_text(body, encoding="utf-8")
+        out["media_roots"] = roots or "(未設定。config.toml の [media_roots] に対象フォルダを書いてください)"
+    out["night_plugin"] = str(install_plugin(settings))
+    return out
+
+
 def setup_env(settings: Settings, *, source: str, python: str | None = None, upgrade: bool = False) -> dict:
     """索引係の venv を作り engram[media] を入れる(重い。数分・数GB)。source は pip が解釈する指定
     (ローカルのソースフォルダ、git+https://…、PyPI 名)。既にあれば upgrade のときだけ入れ直す。"""

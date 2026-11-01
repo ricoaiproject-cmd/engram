@@ -72,6 +72,35 @@ def merge_config_toml(config_file: Path, updates: dict[str, Any]) -> None:
     write_config_toml(config_file, existing)
 
 
+def set_config_scalar(config_file: Path, key: str, value: bool | int | float | str) -> None:
+    """トップレベルのキー1つだけを書き換える(他の行には触れない)。
+
+    merge_config_toml は全体を書き直すため、利用者が手で書いた配列・表・コメントを
+    崩しうる。setup や --uninstall が「意思」を残すときはこちらを使う。
+    """
+    line = f"{key} = {_toml_scalar(value)}\n"
+    if not config_file.is_file():
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        config_file.write_text(line, encoding="utf-8")
+        return
+    lines = config_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    pat = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    first_table = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("["):
+            first_table = i
+            break
+        if pat.match(ln):
+            lines[i] = line
+            config_file.write_text("".join(lines), encoding="utf-8")
+            return
+    at = len(lines) if first_table is None else first_table
+    if at > 0 and not lines[at - 1].endswith("\n"):
+        lines[at - 1] += "\n"
+    lines.insert(at, line)
+    config_file.write_text("".join(lines), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # テンプレート設置
 # ---------------------------------------------------------------------------
@@ -564,6 +593,79 @@ def _detect_agents(
 # セットアップウィザード本体
 # ---------------------------------------------------------------------------
 
+def schedule_step(cfg_path: Path, home: Path, *, schedule: bool | None,
+                  results: list, scheduler_mod=None) -> list[str]:
+    """夜の整理(毎晩)と DMN(15分毎)を OS スケジューラに登録する。冪等。
+
+    止めた意思(config の schedule_night / schedule_dmn = false)は尊重して戻さない。
+    返り値は「止めてある機能・使えない機能」の案内(setup の最後に画面へ出す)。
+    """
+    notices: list[str] = []
+    if schedule is None:
+        print("  (この呼び出しでは登録しません)")
+        return notices
+    from . import scheduler as _sched_default
+    sched = scheduler_mod or _sched_default
+    cfg = read_config_toml(cfg_path)
+    suffix = str(cfg.get("schedule_task_suffix", ""))
+    if schedule is False:
+        for kind in ("night", "dmn"):
+            set_config_scalar(cfg_path, f"schedule_{kind}", False)
+    labels = {"night": ("夜の整理", "毎晩 2:30"), "dmn": ("DMN(自発思考)", "15分毎")}
+    for kind in ("night", "dmn"):
+        name, when = labels[kind]
+        if not read_config_toml(cfg_path).get(f"schedule_{kind}", True):
+            print(f"  {name}: 止めてあります(設定 schedule_{kind} = false)")
+            notices.append(f"{name}は止めてあります。動かすには: engram {kind} --install")
+            results.append((f"{name}の自動実行", True, "止めてある(利用者の設定)"))
+            continue
+        # 同じ名前で利用者が自前の仕組みを登録している場合や、別のホームの登録は上書きしない
+        who = sched.owner(kind, home, suffix=suffix) if hasattr(sched, "owner") else "none"
+        if who == "other":
+            print(f"  {name}: 同じ名前の登録が既にあり、このホームのものではないので、そのままにしました")
+            notices.append(f"{name}: 同じ名前の登録({sched.task_name(kind, suffix)})が別の仕組みのものなので"
+                           f"上書きしていません。engram の登録に置き換えるなら: engram {kind} --install --force-schedule")
+            results.append((f"{name}の自動実行", True, "既存の登録を尊重"))
+            continue
+        ok, msg = sched.install(kind, home=home, suffix=suffix)
+        results.append((f"{name}の自動実行", ok, f"{when}に登録" if ok else msg))
+        print(f"  {name}: " + (f"{when}に登録しました" if ok else f"登録に失敗しました({msg})"))
+    print("  止めるには: engram night --uninstall / engram dmn --uninstall")
+
+    # 夜の整理・DMN が実際に頭を使えるか(手元で見つかったものを自動で選ぶ)
+    try:
+        from .config import get_settings
+        from .night import available_agents
+        settings = get_settings()
+        usable = [line for line, why in available_agents(settings) if why is None]
+        if usable:
+            print(f"  夜の整理の統合に使うもの: {usable[0]}(sleep_agents.txt の上から順に、手元で見つかったもの)")
+            if usable[0].split()[0] in ("claude", "codex"):
+                print("    claude / codex は、あなたの利用枠(定額のログイン)を使います")
+        else:
+            notices.append("夜の整理の統合に使えるもの(claude・codex・Ollama)が見つかりません。"
+                           "沈黙・常連抑制は動き、統合は翌セッションの促しで行います")
+        if not LocalLLMProbe.available(settings):
+            notices.append("DMN と夜の蒸留はローカル LLM(Ollama)が無いので休みます。"
+                           f"使うには Ollama を入れて: ollama pull {settings.llm_model}")
+    except Exception as exc:  # 案内の失敗で setup を止めない
+        print(f"  (使える頭の確認に失敗: {exc})")
+
+    if not read_config_toml(cfg_path).get("media_enabled", False):
+        notices.append("媒体の棚(画像・動画・文書を言葉で探す)は、数GBの追加導入(torch など)が要るので"
+                       "止めてあります。オンにするには: engram media setup")
+    return notices
+
+
+class LocalLLMProbe:
+    """ローカル LLM に届くか(テストで差し替えられるように小さく包む)。"""
+
+    @staticmethod
+    def available(settings) -> bool:
+        from .localllm import LocalLLM
+        return LocalLLM.from_settings(settings).available()
+
+
 def setup_main(
     memories_dir: Path | None = None,
     non_interactive: bool = False,
@@ -575,11 +677,15 @@ def setup_main(
     claude_md_path: Path | None = None,
     codex_dir: Path | None = None,
     gemini_dir: Path | None = None,
+    schedule: bool | None = None,
 ) -> None:
     """セットアップウィザードのメイン処理。冪等。
 
     agents: 登録対象エージェントの内部キー集合("claude"/"codex"/"gemini")。
             None = 従来どおり検出された全部。
+    schedule: True=夜の整理と DMN を OS スケジューラに登録する(`engram setup` の既定)。
+              False=登録せず、止めた意思を設定に残す(`--no-schedule`)。
+              None=何もしない(関数を直接呼ぶテスト等が本物のスケジューラを触らないため)。
     """
     from .config import config_path as _config_path
     from .config import _engram_home as _get_engram_home
@@ -602,7 +708,7 @@ def setup_main(
     # ------------------------------------------------------------------
     # Step 1: memories_dir を決定して config.toml に書き込む
     # ------------------------------------------------------------------
-    print("[1/6] 設定ファイルの作成")
+    print("[1/7] 設定ファイルの作成")
 
     existing_cfg = read_config_toml(cfg_path)
 
@@ -630,14 +736,14 @@ def setup_main(
 
     if "memories_dir" not in existing_cfg or memories_dir is not None:
         chosen_dir = chosen_dir.expanduser().resolve()
-        merge_config_toml(cfg_path, {"memories_dir": str(chosen_dir)})
+        set_config_scalar(cfg_path, "memories_dir", str(chosen_dir))
         print(f"  設定ファイルを作成しました: {cfg_path}")
         print(f"  memories_dir: {chosen_dir}")
         results.append(("設定ファイル作成", True, str(cfg_path)))
 
     # 自発的想起のモードを明示しておく(既定: active=関連記憶を文脈に差し込む)
     if "surface_mode" not in read_config_toml(cfg_path):
-        merge_config_toml(cfg_path, {"surface_mode": "active"})
+        set_config_scalar(cfg_path, "surface_mode", "active")
         print("  surface_mode: active(関連記憶を自動で文脈に差し込む。ログのみの shadow へ変更可)")
 
     chosen_dir = Path(existing_cfg.get("memories_dir", chosen_dir)).expanduser().resolve() \
@@ -648,7 +754,7 @@ def setup_main(
     # ------------------------------------------------------------------
     if "memories_dir" not in existing_cfg or memories_dir is not None:
         print()
-    print("[2/6] 記憶フォルダの初期化")
+    print("[2/7] 記憶フォルダの初期化")
     try:
         MarkdownStore(chosen_dir)
         print(f"  記憶フォルダを初期化しました: {chosen_dir}")
@@ -661,7 +767,7 @@ def setup_main(
     # ------------------------------------------------------------------
     # Step 3: テンプレート設置
     # ------------------------------------------------------------------
-    print("[3/6] テンプレートのコピー")
+    print("[3/7] テンプレートのコピー")
     try:
         copy_templates(home)
         print(f"  MEMORY_PROTOCOL.md -> {home / 'MEMORY_PROTOCOL.md'}")
@@ -675,7 +781,7 @@ def setup_main(
     # ------------------------------------------------------------------
     # Step 4: 埋め込みモデルの取得
     # ------------------------------------------------------------------
-    print("[4/6] 埋め込みモデルの取得")
+    print("[4/7] 埋め込みモデルの取得")
     print("  初回は約500MBをダウンロードします(既にキャッシュがあればスキップ)...")
     embedder = None
     try:
@@ -713,7 +819,7 @@ def setup_main(
     # ------------------------------------------------------------------
     # Step 5: エージェント登録
     # ------------------------------------------------------------------
-    print("[5/6] エージェントへの登録")
+    print("[5/7] エージェントへの登録")
 
     engram_mcp = get_engram_mcp_path()
     if engram_mcp is None:
@@ -849,9 +955,16 @@ def setup_main(
     print()
 
     # ------------------------------------------------------------------
-    # Step 6: 動作確認 + stats
+    # Step 6: 自動実行(夜の整理=毎晩 / DMN=15分毎)の登録
     # ------------------------------------------------------------------
-    print("[6/6] 動作確認")
+    print("[6/7] 自動実行の登録")
+    notices = schedule_step(cfg_path, home, schedule=schedule, results=results)
+    print()
+
+    # ------------------------------------------------------------------
+    # Step 7: 動作確認 + stats
+    # ------------------------------------------------------------------
+    print("[7/7] 動作確認")
     if embedder is None:
         results.append(("動作確認", False, "モデル未取得のためスキップ"))
         print("  モデル未取得のためスキップ(サーバー初回起動時に再試行されます)")
@@ -885,6 +998,12 @@ def setup_main(
     for step, ok, msg in results:
         mark = "[OK]" if ok else "[NG]"
         print(f"  {mark} {step:<{max_step}}  {msg}")
+
+    if notices:
+        print()
+        print("止めてある機能・使えない機能:")
+        for n in notices:
+            print(f"  - {n}")
 
     onboarding_path = home / "ONBOARDING.md"
     print()
