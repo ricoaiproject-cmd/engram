@@ -274,6 +274,12 @@ class Settings:
     # ANTHROPIC_API_KEY / OPENAI_API_KEY が環境にあるとき claude / codex を夜に使うか
     # (従量課金になりうるため既定は使わない。定額の利用枠でログインしていれば鍵は不要)
     night_agents_allow_api_key: bool = False
+    # 夜の整理の要約に、入れた人の claude / codex を使うかの本人の同意。
+    # None=まだ聞いていない(使わない) / True=使う / False=使わない。
+    # 使うと利用枠が毎晩減り、記憶の文章が Anthropic / OpenAI へ送られるため、既定は使わない。
+    # setup が対話で1回聞き、`engram night --allow claude` / `--deny claude` で変えられる
+    night_allow_claude: bool | None = None
+    night_allow_codex: bool | None = None
     distill_window_hours: float = 48.0      # 蒸留の材料にする episode の新しさ
     distill_max_episodes: int = 10          # 1晩に蒸留する episode 数の上限
     # スキル自律作成の置き場と、使われない auto スキルの引退日数

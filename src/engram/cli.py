@@ -389,6 +389,10 @@ def main() -> None:
     p_night.add_argument("--home", default=None, help="扱う engram のホーム(スケジューラ登録が付ける)")
     p_night.add_argument("--force-schedule", dest="force_schedule", action="store_true",
                          help="同じ名前の登録が別のホームや別の仕組みのものでも、上書き・削除する")
+    p_night.add_argument("--allow", action="append", choices=["claude", "codex"], default=[],
+                         help="夜の整理の要約にこの CLI を使うことに同意する(利用枠を使い、記憶の文章を送る)")
+    p_night.add_argument("--deny", action="append", choices=["claude", "codex"], default=[],
+                         help="夜の整理でこの CLI を使わない")
 
     # --- dmn(自発思考) ---
     p_dmn = subparsers.add_parser(
@@ -746,6 +750,19 @@ def main() -> None:
         from . import scheduler
 
         settings = get_settings()
+        if args.command == "night" and (args.allow or args.deny):
+            from .config import config_path
+            from .night import CLOUD_AGENTS, CLOUD_VENDORS
+            from .setup import set_config_scalar
+
+            for key in args.allow:
+                set_config_scalar(config_path(), f"night_allow_{key}", True)
+                print(f"夜の整理の要約に {CLOUD_AGENTS[key]} を使います"
+                      f"(利用枠を毎晩少し使い、記憶の文章を {CLOUD_VENDORS[key]} へ送ります)")
+            for key in args.deny:
+                set_config_scalar(config_path(), f"night_allow_{key}", False)
+                print(f"夜の整理で {CLOUD_AGENTS[key]} を使いません")
+            return
         if args.install or args.uninstall:
             from .config import config_path
             from .setup import set_config_scalar

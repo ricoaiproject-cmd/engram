@@ -83,7 +83,14 @@ echo "[4/4] Running the setup wizard..."
 echo ""
 
 if command -v engram >/dev/null 2>&1; then
-    engram setup
+    # `curl ... | bash` では標準入力が台本そのものなので、端末があればそこから質問に答える
+    if [ -t 0 ]; then
+        engram setup
+    elif (exec < /dev/tty) 2>/dev/null; then
+        engram setup < /dev/tty
+    else
+        engram setup --non-interactive
+    fi
 else
     echo "[ERROR] engram command not found."
     echo "  Restart your terminal and run 'engram setup'."

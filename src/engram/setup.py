@@ -593,8 +593,59 @@ def _detect_agents(
 # セットアップウィザード本体
 # ---------------------------------------------------------------------------
 
+def consent_step(cfg_path: Path, home: Path, *, interactive: bool, ask=input,
+                 which=shutil.which) -> list[str]:
+    """見つかった claude / codex ごとに、夜の整理の要約に使うかを本人に1回だけ聞く。
+
+    既定は N(使わない)。答えは config の night_allow_<名前> に残し、setup をやり直しても
+    聞き直さない。対話できないときは聞かずに使わず、使うための1行を案内に出す。
+    sleep_agents.txt を利用者が自分で書き換えて指定している場合は、その意思を尊重する。
+    """
+    from .config import Settings
+    from .night import CLOUD_AGENTS, CLOUD_VENDORS, agent_key, read_agent_lines, user_edited_agents
+
+    notices: list[str] = []
+    edited = user_edited_agents(Settings(data_dir=home, memories_dir=home / "memories"))
+    listed = {agent_key(ln) for ln in read_agent_lines(home / "sleep_agents.txt")} if edited else set()
+    for key, label in CLOUD_AGENTS.items():
+        if which(key) is None:
+            continue
+        current = read_config_toml(cfg_path).get(f"night_allow_{key}")
+        if current is True:
+            print(f"  {label}: 夜の整理の要約に使います(同意済み。やめるには engram night --deny {key})")
+            continue
+        if current is False:
+            print(f"  {label}: 夜の整理では使いません(使うなら engram night --allow {key})")
+            continue
+        if edited and key not in listed:
+            print(f"  {label}: あなたの sleep_agents.txt に無いので使いません")
+            continue
+        if edited:
+            print(f"  {label}: sleep_agents.txt にあなたが指定しているので、その指定に従います"
+                  f"(やめるには engram night --deny {key})")
+            continue
+        answer = None
+        if interactive:
+            q = (f"  夜の整理(毎晩2時30分)の要約に {label} を使いますか。あなたの利用枠を毎晩少し使い、"
+                 f"記憶の文章を {CLOUD_VENDORS[key]} へ送ります。[y/N]: ")
+            try:
+                answer = ask(q).strip().lower()
+            except (EOFError, OSError):
+                answer = None  # 対話できなかった。決めずに、次の機会に聞く
+        if answer is None:
+            notices.append(f"{label} の利用枠で夜の整理をするには: engram night --allow {key}"
+                           f"(利用枠を毎晩少し使い、記憶の文章を {CLOUD_VENDORS[key]} へ送ります)")
+            continue
+        yes = answer in ("y", "yes", "はい")
+        set_config_scalar(cfg_path, f"night_allow_{key}", yes)
+        print(f"  {label}: " + ("夜の整理の要約に使います" if yes else
+                                f"使いません(あとから使うなら engram night --allow {key})"))
+    return notices
+
+
 def schedule_step(cfg_path: Path, home: Path, *, schedule: bool | None,
-                  results: list, scheduler_mod=None) -> list[str]:
+                  results: list, scheduler_mod=None, interactive: bool = False,
+                  ask=input) -> list[str]:
     """夜の整理(毎晩)と DMN(15分毎)を OS スケジューラに登録する。冪等。
 
     止めた意思(config の schedule_night / schedule_dmn = false)は尊重して戻さない。
@@ -632,19 +683,20 @@ def schedule_step(cfg_path: Path, home: Path, *, schedule: bool | None,
         print(f"  {name}: " + (f"{when}に登録しました" if ok else f"登録に失敗しました({msg})"))
     print("  止めるには: engram night --uninstall / engram dmn --uninstall")
 
-    # 夜の整理・DMN が実際に頭を使えるか(手元で見つかったものを自動で選ぶ)
+    # 入れた人の claude / codex を夜に使うかは、本人に聞いてから(既定は使わない)
+    notices += consent_step(cfg_path, home, interactive=interactive, ask=ask)
+
+    # 夜の整理・DMN が実際に頭を使えるか(同意のあるものと、ローカル LLM)
     try:
         from .config import get_settings
         from .night import available_agents
         settings = get_settings()
         usable = [line for line, why in available_agents(settings) if why is None]
         if usable:
-            print(f"  夜の整理の統合に使うもの: {usable[0]}(sleep_agents.txt の上から順に、手元で見つかったもの)")
-            if usable[0].split()[0] in ("claude", "codex"):
-                print("    claude / codex は、あなたの利用枠(定額のログイン)を使います")
+            print(f"  夜の整理の要約に使うもの: {usable[0]}(sleep_agents.txt の上から順に、使ってよいもの)")
         else:
-            notices.append("夜の整理の統合に使えるもの(claude・codex・Ollama)が見つかりません。"
-                           "沈黙・常連抑制は動き、統合は翌セッションの促しで行います")
+            notices.append("夜の整理の要約に使える AI がありません(ローカル LLM も同意済みの CLI も無い)。"
+                           "沈黙・常連抑制は動き、要約は翌セッションの促しで行います")
         if not LocalLLMProbe.available(settings):
             notices.append("DMN と夜の蒸留はローカル LLM(Ollama)が無いので休みます。"
                            f"使うには Ollama を入れて: ollama pull {settings.llm_model}")
@@ -958,7 +1010,8 @@ def setup_main(
     # Step 6: 自動実行(夜の整理=毎晩 / DMN=15分毎)の登録
     # ------------------------------------------------------------------
     print("[6/7] 自動実行の登録")
-    notices = schedule_step(cfg_path, home, schedule=schedule, results=results)
+    notices = schedule_step(cfg_path, home, schedule=schedule, results=results,
+                            interactive=not non_interactive)
     print()
 
     # ------------------------------------------------------------------

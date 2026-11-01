@@ -84,14 +84,67 @@ def ensure_night_files(settings: Settings) -> tuple[Path, Path]:
 API_KEY_ENVS = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
 
 
+# 入れた人の利用枠を使い、記憶の文章を外へ送る CLI。本人の同意がある分だけ使う
+CLOUD_AGENTS = {"claude": "Claude Code", "codex": "Codex"}
+CLOUD_VENDORS = {"claude": "Anthropic", "codex": "OpenAI"}
+
+
+def agent_key(line: str) -> str | None:
+    """その行が同意の要る CLI なら "claude" / "codex"。それ以外は None。"""
+    try:
+        exe = shlex.split(line, posix=(os.name != "nt"))[0]
+    except (ValueError, IndexError):
+        return None
+    stem = Path(exe).stem.lower()
+    return stem if stem in CLOUD_AGENTS else None
+
+
+def template_agent_lines() -> list[str]:
+    """パッケージ同梱の sleep_agents.txt の有効行(利用者が書き換えたかの判定に使う)。"""
+    from importlib.resources import files
+
+    text = (files("engram") / "templates" / "sleep_agents.txt").read_text(encoding="utf-8")
+    return [s.strip() for s in text.splitlines() if s.strip() and not s.strip().startswith("#")]
+
+
+def user_edited_agents(settings: Settings) -> bool:
+    """sleep_agents.txt の有効行が同梱の雛形と違えば、利用者が自分で書き換えたとみなす。
+
+    書き換えた人が claude / codex の行を残していれば、それは本人の明示の意思として尊重する
+    (0.25.3 以前から自分で並べ替え・追記していた人を、上げただけで止めないため)。
+    雛形のまま置かれているだけの人は、同意したことにしない。
+    """
+    path = settings.data_dir / "sleep_agents.txt"
+    if not path.is_file():
+        return False
+    return read_agent_lines(path) != template_agent_lines()
+
+
+def consent(key: str, settings: Settings) -> tuple[bool, str]:
+    """claude / codex を使ってよいか、とその根拠。"""
+    flag = getattr(settings, f"night_allow_{key}", None)
+    if flag is True:
+        return True, "本人の同意あり"
+    if flag is False:
+        return False, f"本人が使わないと答えた(使うなら engram night --allow {key})"
+    if user_edited_agents(settings):
+        return True, "sleep_agents.txt を利用者が自分で書き換えて指定している"
+    return False, f"本人の同意がまだ無い(使うなら engram night --allow {key})"
+
+
 def agent_unusable_reason(line: str, settings: Settings) -> str | None:
-    """その行のエージェントを今夜使えない理由(使えるなら None)。手元にあるものを自動で選ぶため。"""
+    """その行のエージェントを今夜使えない理由(使えるなら None)。"""
     try:
         exe = shlex.split(line, posix=(os.name != "nt"))[0]
     except (ValueError, IndexError):
         return f"{line} (読めない行)"
     if shutil.which(exe) is None:
         return f"{exe} (見つからない)"
+    key = agent_key(line)
+    if key:
+        ok, why = consent(key, settings)
+        if not ok:
+            return f"{exe} ({why})"
     env = API_KEY_ENVS.get(Path(exe).stem.lower())
     if env and os.environ.get(env) and not settings.night_agents_allow_api_key:
         return f"{exe} ({env} があり従量課金になりうるため。使うなら night_agents_allow_api_key = true)"
@@ -323,7 +376,11 @@ def run_integration(engine, settings: Settings, *, dry_run: bool,
             log_line(settings, "agent OK")
             result["done_by"] = line
             break
-        why = agent_unusable_reason(line, settings) if runner is None else None
+        if runner is None:
+            why = agent_unusable_reason(line, settings)
+        else:  # 差し替え(テスト)でも、本人の同意の確かめだけは必ず通す
+            key = agent_key(line)
+            why = None if not key or consent(key, settings)[0] else f"{line} ({consent(key, settings)[1]})"
         if why:
             log_line(settings, f"agent skip: {why}")
             continue

@@ -402,10 +402,21 @@ engram night --uninstall   # 毎晩の自動実行を止める
    `~/.engram/sleep_prompt.md` の手順で episode クラスタを knowledge に要約させます。特別行 `local-llm` は
    engram 内蔵のローカル LLM 統合(Ollama 互換 API、既定 `gemma4:e2b`)です。**全滅した夜は翌セッションの
    ナッジに自動縮退**するので、LLM が1つも無くても壊れません。モデルを替えるときはコードでなくこのファイルを編集します。
-   `claude -p` や `codex exec` は、あなた自身のアカウントの利用枠で毎晩1回動きます。手元に無いコマンドの行は
-   飛ばすので、入っているものが上から順に自動で選ばれます。`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` が環境にあると
-   従量課金になりうるため、その CLI は使いません(使うなら `night_agents_allow_api_key = true`)。
-   使わせたくない行は `sleep_agents.txt` から消すか、行頭に `#` を付けてください。
+   **既定で使うのは、パソコンの中だけで動くローカル LLM だけです。** `claude -p` や `codex exec` を使うと、
+   あなたの利用枠が毎晩少し減り、記憶の文章が Anthropic / OpenAI へ送られます。そのため、**本人が同意した
+   CLI だけを使います**。`engram setup` を対話で実行すると、見つかった CLI ごとに1回だけ聞きます(既定は N)。
+   答えは設定(`night_allow_claude` / `night_allow_codex`)に残り、setup をやり直しても聞き直しません。
+   あとから変えるときは次の1行です:
+
+   ```powershell
+   engram night --allow claude    # 夜の整理の要約に Claude Code を使う(codex も同じ)
+   engram night --deny claude     # 使わない
+   ```
+
+   対話できない導入(`--non-interactive` など)では聞かずに使わず、最後の画面に上の1行を表示します。
+   `sleep_agents.txt` を自分で書き換えて CLI の行を指定している人は、その指定に従います(同梱の雛形と有効な行が
+   違えば、書き換えたとみなします)。`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` が環境にあると従量課金になりうるため、
+   同意があってもその CLI は使いません(使うなら `night_agents_allow_api_key = true`)。手元に無いコマンドの行は飛ばします。
 2. **沈黙・常連抑制** — 使われない hot 記憶を cold へ(削除はしない)。reinforce されないまま浮上を繰り返す
    記憶は一定期間黙らせます。統合を沈黙より**先**に置くのは、統合の材料が消化前に沈むのを防ぐためです。
 3. **蒸留(LLM)** — 直近48時間の自動符号化 episode から「後日の別の作業でも役立つ知見」だけを抽出し、
@@ -615,7 +626,7 @@ engram の基本(記憶する・思い出す・自発的想起)は、本体だ�
 | 記憶する・思い出す(MCP・CLI) | 本体のみ。初回に埋め込みモデル(約500MB)をダウンロード | — |
 | 自動符号化・自発的想起・初回発話の想起 | Claude Code のフック(`engram setup` が登録) | エージェントが自分で `recall` / `remember` するだけになる |
 | 埋め込みの常駐プロセス | なし(フックが自動で起動する) | 各セッションが自分でモデルを読み込む |
-| 夜の整理の統合(`engram night`) | `sleep_agents.txt` のエージェント CLI(`claude -p` など。自分の利用枠を使う)かローカル LLM | 翌セッションの促し(ナッジ)に切り替わる |
+| 夜の整理の要約(`engram night`) | ローカル LLM(既定)。同意した人は `claude -p` / `codex exec` も(利用枠を使い、記憶の文章を送る。`engram night --allow claude`) | 翌セッションの促し(ナッジ)に切り替わる |
 | 夜の整理の蒸留・DMN・画像の説明文 | ローカル LLM(Ollama 互換。既定 `gemma4:e2b`) | その処理だけ飛ばす |
 | 毎晩・15分毎の自動実行 | なし(`engram setup` が Windows はタスクスケジューラ、ほかは crontab に登録する) | 止めた人(`--uninstall`・`engram setup --no-schedule`)は手で実行したときだけ動く |
 | 仮説サイクル | 毎日回すエージェント(Web で確かめられるもの) | 種選びと台帳は使えるが、判定は進まない |
@@ -775,7 +786,7 @@ curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/insta
 - 記憶・設定(`~/.engram` と記憶フォルダ)はそのまま残ります。消えません
 - 更新後は、engram を使う各エージェント(Claude Code 等)を再起動してください(MCP サーバーの再接続に必要)
 
-### v0.12.x から v0.25.3 へ上げる
+### v0.12.x から v0.25.4 へ上げる
 
 v0.12 から v0.25 までの間に、眠り・DMN・仮説サイクル・媒体の棚・埋め込みの常駐プロセスが加わりました。
 記憶のファイルと索引はそのまま使えます。上げるときにすることは次のとおりです。
@@ -786,6 +797,9 @@ v0.12 から v0.25 までの間に、眠り・DMN・仮説サイクル・媒体�
 3. セットアップが、夜の整理(毎晩)と DMN(15分毎)を自動実行に登録します。止めたいものは
    `engram night --uninstall` / `engram dmn --uninstall` で止められます。媒体の棚だけは数GBの追加導入が
    要るので止めてあり、`engram media setup` の1行でオンになります(セットアップの最後にも表示されます)。
+4. 夜の整理の要約に Claude Code や Codex を使うかは、セットアップが1回だけ聞きます(既定は使わない)。
+   v0.25.3 は手元の CLI を自動で使っていましたが、v0.25.4 に上げると、聞かれて「使う」と答えるまでは
+   ローカル LLM だけになります。`sleep_agents.txt` を自分で書き換えて CLI を指定している場合は、その指定に従います。
 
 v0.25.1 以前の常駐プロセスについて: 古い常駐プロセス(番号 51873)は、自分がどの記憶の係かを名乗らない
 ため、v0.25.2 からは別の engram として扱われ、使われも止められもしません。v0.25.2 は記憶の置き場から

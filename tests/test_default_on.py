@@ -91,10 +91,12 @@ def test_night_skips_missing_cli_and_api_key(monkeypatch):
     assert "見つからない" in night_mod.agent_unusable_reason("engram-no-such-cli-xyz -p", s)
     monkeypatch.setattr(night_mod.shutil, "which", lambda exe: "C:/bin/" + exe)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
-    assert "ANTHROPIC_API_KEY" in night_mod.agent_unusable_reason("claude -p", s)
-    assert night_mod.agent_unusable_reason("claude -p", Settings(night_agents_allow_api_key=True)) is None
+    ok = Settings(night_allow_claude=True)
+    assert "ANTHROPIC_API_KEY" in night_mod.agent_unusable_reason("claude -p", ok)
+    assert night_mod.agent_unusable_reason(
+        "claude -p", Settings(night_allow_claude=True, night_agents_allow_api_key=True)) is None
     monkeypatch.delenv("ANTHROPIC_API_KEY")
-    assert night_mod.agent_unusable_reason("claude -p", s) is None
+    assert night_mod.agent_unusable_reason("claude -p", ok) is None
 
 
 def test_media_enable_sets_flag_roots_and_plugin(tmp_path, monkeypatch):
