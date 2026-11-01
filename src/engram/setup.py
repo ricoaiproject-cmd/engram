@@ -239,14 +239,16 @@ def _is_engram_hook_cmd(command: str) -> bool:
 
 #: Codex に登録するフック(~/.codex/hooks.json。書き方と入出力は Claude Code と同じ形。秒)
 _CODEX_HOOK_EVENTS: list[tuple[str, str, int]] = [
-    ("SessionEnd", "session-end", 180),       # Codex の SessionEnd は既定1秒なので明示する
-    ("UserPromptSubmit", "user-prompt", 15),
+    # Codex は SessionEnd の待ち時間を3秒に切り詰める(codex 0.153.4 で確認)。要約は裏のプロセスで行う
+    ("SessionEnd", "session-end --agent codex --detach", 3),
+    ("UserPromptSubmit", "user-prompt --agent codex", 15),
 ]
 
 #: Gemini CLI に登録するフック(~/.gemini/settings.json。発言ごとは BeforeAgent・ミリ秒)
 _GEMINI_HOOK_EVENTS: list[tuple[str, str, int]] = [
-    ("SessionEnd", "session-end", 180_000),
-    ("BeforeAgent", "user-prompt --event-name BeforeAgent", 15_000),
+    # Gemini CLI は SessionEnd の完了を待たないので、要約は裏のプロセスで行う
+    ("SessionEnd", "session-end --agent gemini --detach", 5_000),
+    ("BeforeAgent", "user-prompt --agent gemini --event-name BeforeAgent", 15_000),
 ]
 
 
@@ -285,6 +287,86 @@ def register_gemini_hooks(settings_path: Path, engram_cli: Path) -> tuple[bool, 
     except Exception as e:
         return False, f"フックの有効化に失敗: {e}"
     return True, msg
+
+
+def remove_engram_hooks(path: Path) -> tuple[bool, str]:
+    """1つの設定ファイルから engram のフックだけを外す(利用者の項目は残す)。冪等。
+
+    {"hooks": {イベント: [{"hooks": [...]}]}} の形(Claude Code・Codex・Gemini CLI)では
+    "engram hook" のコマンドだけを除き、空になった入れ物も片付ける。Antigravity の名前付きの形では
+    "engram" の項目だけを除く。
+    """
+    if not path.is_file():
+        return True, "ファイルなし"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return False, f"{path.name} が解析できないため変更しません"
+    removed = 0
+    if isinstance(data.get("engram"), dict) and "hooks" not in data:
+        data.pop("engram")
+        removed = 1
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event in list(hooks):
+            entries = hooks[event] if isinstance(hooks[event], list) else []
+            kept_entries = []
+            for entry in entries:
+                inner = entry.get("hooks", []) if isinstance(entry, dict) else []
+                kept = [h for h in inner if not _is_engram_hook_cmd(str(h.get("command", "")))]
+                removed += len(inner) - len(kept)
+                if kept or not inner:
+                    kept_entries.append({**entry, "hooks": kept} if inner else entry)
+            if kept_entries:
+                hooks[event] = kept_entries
+            else:
+                hooks.pop(event)
+        if not hooks:
+            data.pop("hooks")
+    if not removed:
+        return True, "engram のフックなし"
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True, f"engram のフックを{removed}件外した"
+
+
+def remove_all_engram_hooks(home: Path | None = None) -> list[tuple[str, bool, str]]:
+    """全エージェントの置き場から engram のフックだけを外す(engram setup --remove-hooks)。"""
+    h = home or Path.home()
+    targets = [h / ".claude" / "settings.json", h / ".codex" / "hooks.json",
+               h / ".gemini" / "settings.json", h / ".gemini" / "config" / "hooks.json"]
+    return [(str(p), *remove_engram_hooks(p)) for p in targets]
+
+
+def register_antigravity_hooks(hooks_path: Path, engram_cli: Path) -> tuple[bool, str]:
+    """Antigravity の ~/.gemini/config/hooks.json に engram の項目を足す。冪等。
+
+    ここは名前付きの形({名前: {"enabled": bool, イベント: [...]}})で、利用者が自分で入れた
+    項目(自己検証など)が並ぶ。engram は "engram" の名前の項目だけを足し・直し、ほかには触れない。
+    Stop は応答が終わるたびに呼ばれ、手が空いたとき(fullyIdle)だけ増えた分を記録する。
+    Windows では cmd /c を通すため、先頭のパスは引用符なしで書く(空白のあるパスは使えない)。
+    """
+    cli = str(engram_cli)
+    if " " in cli:
+        return False, f"engram のパスに空白があるため登録できません({cli})"
+    entry = {"enabled": True,
+             "Stop": [{"type": "command", "command": f"{cli} hook stop --agent antigravity", "timeout": 20}]}
+    try:
+        hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict = {}
+        if hooks_path.is_file() and hooks_path.read_text(encoding="utf-8").strip():
+            try:
+                data = json.loads(hooks_path.read_text(encoding="utf-8"))
+            except Exception:
+                return False, "既存の hooks.json が解析できないため変更しません(手動で修復してください)"
+        current = data.get("engram")
+        if isinstance(current, dict) and current.get("Stop") == entry["Stop"]:
+            return True, "既登録(スキップ)"
+        enabled = current.get("enabled", True) if isinstance(current, dict) else True
+        data["engram"] = {**entry, "enabled": enabled}  # 利用者が止めていたら止めたままにする
+        hooks_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return True, "登録完了" if current is None else "パスを更新"
+    except Exception as e:
+        return False, f"登録失敗: {e}"
 
 
 def register_agent_hooks(
@@ -1184,6 +1266,11 @@ def setup_main(
                 ok3, msg3 = register_gemini_hooks(_gemini_dir / "settings.json", engram_cli)
                 results.append(("Gemini CLI フック登録", ok3, msg3))
                 print(f"  Gemini CLI フック登録: {msg3}")
+                # Antigravity(Gemini CLI の後継。~/.gemini/config を使う)
+                if shutil.which("agy") or any(_gemini_dir.glob("antigravity*")):
+                    ok4, msg4 = register_antigravity_hooks(_gemini_dir / "config" / "hooks.json", engram_cli)
+                    results.append(("Antigravity フック登録", ok4, msg4))
+                    print(f"  Antigravity フック登録: {msg4}")
         else:
             print("  Antigravity/Gemini: 未検出(インストールされていれば後で `engram setup` を再実行)")
     else:

@@ -9,6 +9,7 @@ LLM を使わない決定的要約: セッションの背骨はユーザー発�
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 # Claude Code がユーザー発言として transcript に混ぜ込む非発話テキストの先頭部
@@ -18,6 +19,8 @@ _NOISE_PREFIXES = (
     "[Request interrupted",
     "# AGENTS.md instructions",  # Codex が利用者の発言として差し込む指示ファイル
 )
+
+_AGY_REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 
 
 def _texts_from_content(content) -> list[str]:
@@ -81,6 +84,23 @@ def extract_messages(transcript_path: str | Path) -> dict:
                     summary = s.strip()
                 continue
             if obj.get("isMeta"):
+                continue
+
+            # Antigravity の記録(brain/<id>/.system_generated/logs/transcript_full.jsonl):
+            # 1行1ステップ。利用者の発言は USER_INPUT の content(<USER_REQUEST> で囲まれる)、
+            # 応答は PLANNER_RESPONSE の content(本文の無いステップもある)
+            if kind in ("USER_INPUT", "PLANNER_RESPONSE") and isinstance(obj.get("content"), str):
+                text = obj["content"]
+                if kind == "USER_INPUT":
+                    m = _AGY_REQUEST.search(text)
+                    text = m.group(1) if m else text
+                    if not _is_noise(text):
+                        user_texts.append(text.strip())
+                elif text.strip():
+                    last_assistant = text.strip()
+                    assistant_texts.append(last_assistant)
+                    if len(assistant_texts) > 3:
+                        assistant_texts.pop(0)
                 continue
 
             # Codex の記録: {"type": "response_item", "payload": {"type": "message", "role": ...,

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -437,6 +439,71 @@ def _distinctive_terms(content: str, *, limit: int = 12) -> list[str]:
     return seen
 
 
+def _progress_path(settings: Settings) -> Path:
+    return settings.data_dir / "encode_progress.json"
+
+
+def _read_progress(settings: Settings) -> dict:
+    try:
+        return json.loads(_progress_path(settings).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_progress(settings: Settings, session_id: str, n: int) -> None:
+    state = _read_progress(settings)
+    state[session_id] = n
+    if len(state) > 500:  # 古い会話の分は捨てる(挿入順で古いもの)
+        state = dict(list(state.items())[-500:])
+    path = _progress_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def normalize_stop_input(data: dict, agent: str) -> dict | None:
+    """エージェントごとの「応答が終わった」フックの入力を、session-end の形に読み替える。
+
+    Antigravity の Stop は会話の途中(サブエージェント待ち fullyIdle=false など)でも呼ばれるので、
+    手が空いたとき(fullyIdle=true)だけ記録する。記録しないときは None。
+    """
+    if agent == "antigravity":
+        if data.get("fullyIdle") is not True:
+            return None
+        ws = data.get("workspacePaths") or []
+        return {"session_id": str(data.get("conversationId", "")),
+                "transcript_path": data.get("transcriptPath", ""),
+                "cwd": ws[0] if isinstance(ws, list) and ws else "",
+                "incremental": True}
+    return None
+
+
+def detach_session_end(payload: dict) -> bool:
+    """要約を裏のプロセスに任せてすぐ返す。
+
+    Codex は会話の終わりのフックを3秒で打ち切り、Gemini CLI と Antigravity は完了を待たない。
+    埋め込みモデルの読み込みと要約はそれより長くかかるので、入力をファイルに置いて別のプロセスで行う。
+    """
+    try:
+        settings = get_settings()
+        q = settings.data_dir / "hook_queue"
+        q.mkdir(parents=True, exist_ok=True)
+        path = q / f"{int(time.time() * 1000)}_{os.getpid()}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        exe = Path(sys.executable)
+        pyw = exe.with_name("pythonw.exe")
+        runner = str(pyw if pyw.is_file() else exe)
+        kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                        "stderr": subprocess.DEVNULL, "close_fds": True}
+        if os.name == "nt":
+            kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000  # 切り離し・新グループ・窓なし
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([runner, "-m", "engram", "hook", "session-end", "--from-file", str(path)], **kwargs)
+        return True
+    except Exception:
+        return False
+
+
 def run_session_end(stdin_text: str | None = None) -> int:
     """SessionEnd フック本体。常に 0 を返す(セッション終了を妨げない)。"""
     try:
@@ -455,9 +522,6 @@ def run_session_end(stdin_text: str | None = None) -> int:
         if not transcript_path or not Path(transcript_path).is_file():
             _log(settings, f"session-end {session_id}: transcript なし、スキップ")
             return 0
-        if session_id != "unknown" and _already_encoded(settings, session_id):
-            _log(settings, f"session-end {session_id}: 符号化済み、スキップ")
-            return 0
 
         from .transcript import (
             build_episodes,
@@ -466,6 +530,23 @@ def run_session_end(stdin_text: str | None = None) -> int:
         )
 
         messages = extract_messages(transcript_path)
+        # 会話の途中で何度も呼ばれるエージェント(Antigravity の Stop)は、前回までに記録した
+        # 発言の数を覚えておき、増えた分だけを記録する
+        progress_total = None
+        if data.get("incremental") and session_id != "unknown":
+            done = int(_read_progress(settings).get(session_id, 0))
+            users = messages.get("user_texts", [])
+            if len(users) <= done:
+                _log(settings, f"session-end {session_id}: 新しい発言なし、スキップ")
+                return 0
+            messages = {**messages, "user_texts": users[done:]}
+            progress_total = len(users)
+            session_id = f"{session_id}@{done}"
+        if session_id != "unknown" and _already_encoded(settings, session_id):
+            _log(settings, f"session-end {session_id}: 符号化済み、スキップ")
+            return 0
+        if progress_total is not None:
+            _write_progress(settings, session_id.split("@", 1)[0], progress_total)
         project = Path(cwd or messages.get("cwd") or "").name
         episodes = build_episodes(
             messages,

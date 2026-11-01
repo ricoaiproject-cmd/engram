@@ -318,6 +318,11 @@ def main() -> None:
         action="store_true",
         help="夜の整理(毎晩)と DMN(15分毎)の自動実行を登録しない(設定に schedule_night/schedule_dmn=false を残す)",
     )
+    p_setup.add_argument(
+        "--remove-hooks",
+        action="store_true",
+        help="Claude Code・Codex・Gemini CLI・Antigravity の設定から engram のフックだけを外す(ほかの項目は残す)",
+    )
 
     # --- doctor ---
     subparsers.add_parser("doctor", help="環境診断を表示する")
@@ -492,13 +497,19 @@ def main() -> None:
     )
     p_hook.add_argument(
         "event",
-        choices=["session-end", "user-prompt"],
-        help="フックイベント名",
+        choices=["session-end", "user-prompt", "stop"],
+        help="フックイベント名(stop は応答が終わったとき。Antigravity 用)",
     )
     p_hook.add_argument(
         "--event-name", default="UserPromptSubmit",
         help="応答の hookEventName(Gemini CLI は BeforeAgent)",
     )
+    p_hook.add_argument("--agent", default="claude",
+                        choices=["claude", "codex", "gemini", "antigravity"],
+                        help="呼んだエージェント(入力の形の読み替えに使う)")
+    p_hook.add_argument("--detach", action="store_true",
+                        help="要約を裏のプロセスに任せてすぐ返す(会話の終わりを待たないエージェント用)")
+    p_hook.add_argument("--from-file", default=None, help="(内部用)入力を標準入力ではなくファイルから読む")
 
     args = parser.parse_args()
 
@@ -509,6 +520,12 @@ def main() -> None:
         os.environ["ENGRAM_HOME"] = args.home
 
     # setup / doctor はエンジン構築なしで動く
+    if args.command == "setup" and args.remove_hooks:
+        from .setup import remove_all_engram_hooks
+        for path, ok, msg in remove_all_engram_hooks():
+            print(f"  {path}: {msg}")
+        return
+
     if args.command == "setup":
         from .setup import parse_agents, setup_main
         memories_dir = None
@@ -557,8 +574,33 @@ def main() -> None:
 
     # hook / surface はエンジン構築なし(高速経路)で動く
     if args.command == "hook":
-        from .hooks import run_session_end, run_user_prompt
+        from .hooks import (detach_session_end, normalize_stop_input, run_session_end,
+                            run_user_prompt)
+        if args.from_file:
+            from pathlib import Path
+            p = Path(args.from_file)
+            try:
+                text = p.read_text(encoding="utf-8")
+            finally:
+                p.unlink(missing_ok=True)
+            sys.exit(run_session_end(text))
+        if args.event == "stop":
+            try:
+                data = json.loads(sys.stdin.read() or "{}")
+            except ValueError:
+                sys.exit(0)
+            payload = normalize_stop_input(data, args.agent)
+            if payload:
+                detach_session_end(payload)
+            sys.exit(0)
         if args.event == "session-end":
+            if args.detach:
+                try:
+                    data = json.loads(sys.stdin.read() or "{}")
+                except ValueError:
+                    sys.exit(0)
+                detach_session_end(data)
+                sys.exit(0)
             sys.exit(run_session_end())
         else:
             sys.exit(run_user_prompt(event_name=args.event_name))

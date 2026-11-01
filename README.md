@@ -88,22 +88,32 @@ OS の予約(毎晩・毎日の自動実行)で動きます。どのエージェ
 |---|---|---|---|---|
 | 記憶する・思い出す(MCP の道具) | ○ | ○ | ○ | ○ |
 | 記憶の使い方の案内(指示ファイル・MCP の案内) | ○ CLAUDE.md | ○ AGENTS.md | ○ GEMINI.md | ○ GEMINI.md(※1) |
-| 会話の終わりの自動記録(フック) | ○ | ○(`/hooks` で承認後) | △(※2) | × |
-| 発言ごとの自発的想起・縁・着手前の促し(フック) | ○ | ○(`/hooks` で承認後) | ○ | × |
-| 記憶整理・スキル化の促し | ○ フックと MCP | ○ フックと MCP | ○ フックと MCP | ○ MCP のみ |
+| 会話の自動記録(フック) | ○ 会話の終わり | ○ 会話の終わり(※4) | ○ 会話の終わり(※2) | ○ 応答が終わるたびに増えた分(※5) |
+| 発言ごとの自発的想起・縁・着手前の促し(フック) | ○ | ○(※4) | ○ | ×(※5) |
+| 記憶整理・スキル化の促し | ○ フックと MCP | ○ フックと MCP | ○ フックと MCP | ○ MCP |
 | 夜の整理(沈黙・常連抑制) | ○ | ○ | ○ | ○ |
 | 夜の整理の要約 | ローカル LLM か、同意すれば Claude Code | ローカル LLM か、同意すれば Codex | ローカル LLM | ローカル LLM |
 | DMN(自発思考) | ローカル LLM があれば | 同左 | 同左 | 同左 |
 | 仮説サイクルの毎日の実行 | 同意すれば ○ | 同意すれば ○(※3) | ×(手で回すのみ) | ×(手で回すのみ) |
 | 媒体の棚 | ○ | ○ | ○ | ○ |
 
-- ※1 Antigravity の指示ファイルと MCP の設定の場所は、公式の資料で確定できていません。engram は
-  `~/.gemini/GEMINI.md` と `~/.gemini/config/mcp_config.json` に書きます。
-- ※2 Gemini CLI は会話の終わりのフックの完了を待たないため、記録が間に合わないことがあります。Gemini CLI は
-  設定 `tools.enableHooks` が `true` のときだけフックを動かすので、engram はフックを登録するときにこれをオンにします。
+- ※1 Antigravity は、MCP の設定を `~/.gemini/config/mcp_config.json` から、指示ファイルを `~/.gemini/GEMINI.md`
+  などから読みます(Antigravity の公式資料の docs/mcp と docs/rules)。engram はこの2つに書きます。
+- ※2 Gemini CLI は会話の終わりのフックの完了を待たないので、engram は入力を受け取ってすぐ返し、要約は裏の
+  別のプロセスで行います。Gemini CLI は設定 `tools.enableHooks` が `true` のときだけフックを動かすので、
+  engram はフックを登録するときにこれをオンにします。
 - ※3 Codex での仮説サイクルは、MCP の道具と Web 検索を非対話で使う設定(`codex exec`)の実機確認がまだです。
+- ※4 Codex は、新しく足したフックを、利用者が Codex の中で `/hooks` を開いて承認するまで動かしません
+  (Codex の安全の仕組みなので、engram は承認を代わりに行いません)。セットアップの画面に案内が出ます。
+  会話の終わりのフックは Codex が3秒で打ち切るため、要約は裏の別のプロセスで行います。
+- ※5 Antigravity のフックは `~/.gemini/config/hooks.json` に「engram」という名前で入ります(ほかの名前の項目には
+  触れません)。応答が終わるたびに呼ばれる Stop で、手が空いたとき(サブエージェントを待っていないとき)だけ、
+  前回からの増えた分を記録します。発言ごとの想起は未対応です。Antigravity には「話しかけたとき」のイベントが無く、
+  近い PreInvocation(モデルを呼ぶ前)は利用者の発言を受け取らず、文脈へ差し込む項目(injectSteps)の中身の形も
+  公式の資料で確定できないためです(形を間違えると Antigravity の動きを妨げうるので、確かめられるまで入れません)。
+  記憶の使い方の案内と、`recall` の応答に添える促しは届きます。
 
-フックが無い環境(Antigravity・Codex でフックを承認していない人)では、記憶の保存と想起はエージェントが
+フックが無い環境(Codex でフックを承認していない人など)では、記憶の保存と想起はエージェントが
 `recall` / `remember` を呼んだときだけになり、会話が自動で記憶になることはありません。
 
 ---
@@ -886,24 +896,27 @@ engram dmn --uninstall
 engram hyp-run --stop
 engram media uninstall
 
-# 2. 各エージェントから登録を削除
-claude mcp remove engram
-# 2a. Claude Code: ~/.claude/settings.json の hooks から "engram hook ..." の項目と、
-#     ~/.claude/CLAUDE.md の「# 記憶プロトコル(engram)」のブロックを手動削除
-# 2b. Codex: ~/.codex/config.toml の [mcp_servers.engram] ブロック、~/.codex/hooks.json の
-#     "engram hook ..." の項目、~/.codex/AGENTS.md の「# 記憶プロトコル(engram)」のブロックを手動削除
-# 2c. Gemini CLI / Antigravity: ~/.gemini/settings.json の mcpServers.engram と hooks の "engram hook ..."、
-#     ~/.gemini/config/mcp_config.json の engram、~/.gemini/GEMINI.md の「# 記憶プロトコル(engram)」のブロックを手動削除
+# 2. 各エージェントのフックから engram の項目だけを外す(Claude Code・Codex・Gemini CLI・Antigravity。
+#    利用者が自分で入れたフックは残る)
+engram setup --remove-hooks
 
-# 3. engram 本体をアンインストール
+# 3. 各エージェントから MCP の登録と記憶プロトコルを外す
+claude mcp remove engram
+# 3a. Claude Code: ~/.claude/CLAUDE.md の「# 記憶プロトコル(engram)」のブロックを手動削除
+# 3b. Codex: ~/.codex/config.toml の [mcp_servers.engram] ブロックと、~/.codex/AGENTS.md の
+#     「# 記憶プロトコル(engram)」のブロックを手動削除
+# 3c. Gemini CLI / Antigravity: ~/.gemini/settings.json の mcpServers.engram、~/.gemini/config/mcp_config.json の
+#     engram、~/.gemini/GEMINI.md の「# 記憶プロトコル(engram)」のブロックを手動削除
+
+# 4. engram 本体をアンインストール
 uv tool uninstall engram
 
-# 4. データを削除する場合(記憶・設定・モデルキャッシュ)
+# 5. データを削除する場合(記憶・設定・モデルキャッシュ)
 Remove-Item -Recurse -Force "$env:USERPROFILE\.engram"
 Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--cl-nagoya--ruri*"
 ```
 
-macOS / Linux の手順3-4:
+macOS / Linux の手順4-5:
 
 ```bash
 uv tool uninstall engram

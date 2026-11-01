@@ -17,8 +17,9 @@ def test_codex_hooks_use_same_shape_with_explicit_session_end_timeout(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     ups = data["hooks"]["UserPromptSubmit"][0]["hooks"][0]
     end = data["hooks"]["SessionEnd"][0]["hooks"][0]
-    assert ok and ups["type"] == "command" and ups["command"].endswith("hook user-prompt")
-    assert end["timeout"] == 180  # Codex の SessionEnd の既定(1秒)では要約が終わらない
+    assert ok and ups["type"] == "command" and "hook user-prompt" in ups["command"]
+    # Codex は SessionEnd を3秒で打ち切るので、要約は裏のプロセスに任せてすぐ返す
+    assert "--detach" in end["command"] and end["timeout"] == 3
     assert setup_mod.register_codex_hooks(path, Path("C:/bin/engram.exe"))[1] == "既登録(スキップ)"
 
 
@@ -168,3 +169,82 @@ def test_codex_transcript_is_read_like_claude(tmp_path):
     m = extract_messages(p)
     assert m["user_texts"] == ["ログの集計を直して"]
     assert m["last_assistant"] == "集計を直しました" and m["cwd"] == "C:/work/proj"
+
+
+def test_antigravity_stop_records_only_when_fully_idle():
+    from engram.hooks import normalize_stop_input
+
+    base = {"conversationId": "c1", "transcriptPath": "C:/t.jsonl", "workspacePaths": ["C:/w"]}
+    assert normalize_stop_input({**base, "fullyIdle": False}, "antigravity") is None
+    p = normalize_stop_input({**base, "fullyIdle": True}, "antigravity")
+    assert p == {"session_id": "c1", "transcript_path": "C:/t.jsonl", "cwd": "C:/w", "incremental": True}
+
+
+def test_antigravity_transcript_is_read(tmp_path):
+    from engram.transcript import extract_messages
+
+    rows = [
+        {"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>\n報告書を直して\n</USER_REQUEST>\n<ADDITIONAL_METADATA>x</ADDITIONAL_METADATA>"},
+        {"step_index": 1, "type": "PLANNER_RESPONSE", "thinking": "...", "tool_calls": []},
+        {"step_index": 2, "type": "GENERIC", "content": "tool output"},
+        {"step_index": 3, "type": "PLANNER_RESPONSE", "content": "直しました"},
+    ]
+    p = tmp_path / "transcript_full.jsonl"
+    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    m = extract_messages(p)
+    assert m["user_texts"] == ["報告書を直して"] and m["last_assistant"] == "直しました"
+
+
+def test_incremental_session_end_records_only_new_turns(tmp_path, monkeypatch):
+    from engram import hooks
+
+    monkeypatch.setattr(hooks, "get_settings", lambda: Settings(data_dir=tmp_path / "d", memories_dir=tmp_path / "m"))
+    seen = []
+    monkeypatch.setattr("engram.transcript.build_episodes",
+                        lambda messages, **kw: seen.append(list(messages["user_texts"])) or [])
+    t = tmp_path / "t.jsonl"
+
+    def write(n):
+        rows = [{"type": "USER_INPUT", "content": f"<USER_REQUEST>発言{i}</USER_REQUEST>"} for i in range(n)]
+        t.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+
+    payload = {"session_id": "c1", "transcript_path": str(t), "cwd": "", "incremental": True}
+    write(2)
+    hooks.run_session_end(json.dumps(payload))
+    write(3)
+    hooks.run_session_end(json.dumps(payload))
+    hooks.run_session_end(json.dumps(payload))  # 増えていなければ何もしない
+    assert seen == [["発言0", "発言1"], ["発言2"]]
+
+
+def test_antigravity_hooks_keep_users_named_entries(tmp_path):
+    path = tmp_path / "config" / "hooks.json"
+    path.parent.mkdir()
+    mine = {"self-verify-gate": {"enabled": False, "Stop": [{"type": "command", "command": "py gate.py stop", "timeout": 20}]}}
+    path.write_text(json.dumps(mine), encoding="utf-8")
+    ok, _ = setup_mod.register_antigravity_hooks(path, Path("C:/bin/engram.exe"))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert ok and data["self-verify-gate"] == mine["self-verify-gate"]
+    assert data["engram"]["enabled"] is True
+    assert data["engram"]["Stop"][0]["command"].startswith("C:") and "hook stop --agent antigravity" in data["engram"]["Stop"][0]["command"]
+    assert setup_mod.register_antigravity_hooks(path, Path("C:/bin/engram.exe"))[1] == "既登録(スキップ)"
+    assert not setup_mod.register_antigravity_hooks(path, Path("C:/Program Files/engram.exe"))[0]
+    setup_mod.remove_engram_hooks(path)
+    assert json.loads(path.read_text(encoding="utf-8")) == mine
+
+
+def test_remove_hooks_keeps_users_own_hooks(tmp_path):
+    path = tmp_path / ".codex" / "hooks.json"
+    path.parent.mkdir()
+    own = {"type": "command", "command": "python context_bridge.py prompt", "timeout": 10}
+    path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [own]}],
+                                          "Stop": [{"hooks": [own]}]}}), encoding="utf-8")
+    setup_mod.register_codex_hooks(path, Path("C:/bin/engram.exe"))
+    setup_mod.register_codex_hooks(path, Path("C:/bin/engram.exe"))  # 二重に入らない
+    data = json.loads(path.read_text(encoding="utf-8"))
+    cmds = [h["command"] for e in data["hooks"]["UserPromptSubmit"] for h in e["hooks"]]
+    assert cmds.count(own["command"]) == 1 and sum("engram" in c for c in cmds) == 1
+    ok, msg = setup_mod.remove_engram_hooks(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert ok and "2件" in msg
+    assert data == {"hooks": {"UserPromptSubmit": [{"hooks": [own]}], "Stop": [{"hooks": [own]}]}}
