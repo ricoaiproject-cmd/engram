@@ -13,9 +13,9 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
         shell: bash
@@ -48,8 +48,8 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
 
       - name: Install from the checkout as a user would
         shell: bash
@@ -69,7 +69,8 @@ jobs:
           ENGRAM_DISABLE_DAEMON: "1"
         run: |
           set -ex
-          if [ -f .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
+          # absolute path: the next line leaves the checkout, so a relative .venv path no longer resolves
+          if [ -f .venv/bin/python ]; then PY="$(pwd)/.venv/bin/python"; else PY="$(pwd)/.venv/Scripts/python.exe"; fi
           cd "$RUNNER_TEMP"   # leave the checkout so the installed package is what runs
           "$PY" -m engram --fake-embedder remember "clean-room smoke memory about openpyxl formulas" --type knowledge --importance 5
           "$PY" -m engram --fake-embedder recall "openpyxl" --no-record
